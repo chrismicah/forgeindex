@@ -226,7 +226,7 @@ Returns index health metrics: file count, symbol count, last update timestamp, n
 
 ## reindex
 
-Force re-index of a specific file or the entire repository. Rarely needed due to auto-reindexing, but useful for debugging.
+Force re-index of a specific file or the entire repository. Rarely needed due to auto-reindexing, but useful for debugging. Directory reindex responses report both files that were updated and files that were unchanged.
 
 **Parameters:**
 | Name | Type | Required | Description |

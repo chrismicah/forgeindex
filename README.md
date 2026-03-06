@@ -63,9 +63,24 @@ forgeindex serve
 | `index_status` | Index health metrics |
 | `reindex` | Force re-index |
 
-## Claude Desktop Integration
+## Claude MCP Integration
 
-Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
+For Claude Code, add ForgeIndex to your user-level MCP config:
+
+```bash
+claude mcp add -s user forgeindex forgeindex serve
+```
+
+ForgeIndex uses the current working directory as the project root unless you pin a `cwd`
+in Claude's MCP config. The safest workflow is:
+
+```bash
+cd /path/to/your/project
+forgeindex init
+claude
+```
+
+For Claude Desktop, add it to `claude_desktop_config.json`:
 
 ```json
 {
@@ -97,7 +112,7 @@ Configuration is stored in `.forgeindex/config.toml`:
 
 ```toml
 [index]
-languages = ["python", "typescript", "javascript", "rust", "go", "java", "c", "cpp", "ruby"]
+languages = ["python", "typescript", "tsx", "javascript", "rust", "go", "java", "c", "cpp", "ruby"]
 exclude_patterns = ["**/node_modules/**", "**/dist/**", "**/*.min.js"]
 include_tests = false
 max_file_size_kb = 512

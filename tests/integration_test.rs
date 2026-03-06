@@ -34,17 +34,44 @@ fn test_parse_python_file() {
 
     // Should find: Application class, create_app function, MAX_RETRIES, DEFAULT_TIMEOUT
     let names: Vec<&str> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"Application"), "Missing Application class: {:?}", names);
-    assert!(names.contains(&"create_app"), "Missing create_app function: {:?}", names);
-    assert!(names.contains(&"MAX_RETRIES"), "Missing MAX_RETRIES const: {:?}", names);
+    assert!(
+        names.contains(&"Application"),
+        "Missing Application class: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"create_app"),
+        "Missing create_app function: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"MAX_RETRIES"),
+        "Missing MAX_RETRIES const: {:?}",
+        names
+    );
 
     // Application class should have children (methods)
-    let app_class = parsed.symbols.iter().find(|s| s.name == "Application").unwrap();
-    assert!(!app_class.children.is_empty(), "Application should have methods");
+    let app_class = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "Application")
+        .unwrap();
+    assert!(
+        !app_class.children.is_empty(),
+        "Application should have methods"
+    );
 
     let method_names: Vec<&str> = app_class.children.iter().map(|s| s.name.as_str()).collect();
-    assert!(method_names.contains(&"__init__"), "Missing __init__: {:?}", method_names);
-    assert!(method_names.contains(&"run"), "Missing run: {:?}", method_names);
+    assert!(
+        method_names.contains(&"__init__"),
+        "Missing __init__: {:?}",
+        method_names
+    );
+    assert!(
+        method_names.contains(&"run"),
+        "Missing run: {:?}",
+        method_names
+    );
 }
 
 #[test]
@@ -60,7 +87,11 @@ fn test_parse_python_utils() {
     assert!(names.contains(&"PI"), "Missing PI constant: {:?}", names);
 
     // Check visibility of _internal_helper
-    let helper = parsed.symbols.iter().find(|s| s.name == "_internal_helper").unwrap();
+    let helper = parsed
+        .symbols
+        .iter()
+        .find(|s| s.name == "_internal_helper")
+        .unwrap();
     assert_eq!(helper.visibility, parser::Visibility::Private);
 }
 
@@ -73,8 +104,16 @@ fn test_parse_typescript_file() {
     assert_eq!(parsed.language, "typescript");
 
     let names: Vec<&str> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"User"), "Missing User interface: {:?}", names);
-    assert!(names.contains(&"ApiResponse"), "Missing ApiResponse interface: {:?}", names);
+    assert!(
+        names.contains(&"User"),
+        "Missing User interface: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"ApiResponse"),
+        "Missing ApiResponse interface: {:?}",
+        names
+    );
 }
 
 #[test]
@@ -88,14 +127,38 @@ fn test_parse_imports_python() {
 
 #[test]
 fn test_detect_language() {
-    assert_eq!(parser::detect_language(Path::new("foo.py")), Some("python".into()));
-    assert_eq!(parser::detect_language(Path::new("bar.ts")), Some("typescript".into()));
-    assert_eq!(parser::detect_language(Path::new("baz.rs")), Some("rust".into()));
-    assert_eq!(parser::detect_language(Path::new("qux.go")), Some("go".into()));
-    assert_eq!(parser::detect_language(Path::new("main.java")), Some("java".into()));
-    assert_eq!(parser::detect_language(Path::new("lib.c")), Some("c".into()));
-    assert_eq!(parser::detect_language(Path::new("lib.cpp")), Some("cpp".into()));
-    assert_eq!(parser::detect_language(Path::new("gem.rb")), Some("ruby".into()));
+    assert_eq!(
+        parser::detect_language(Path::new("foo.py")),
+        Some("python".into())
+    );
+    assert_eq!(
+        parser::detect_language(Path::new("bar.ts")),
+        Some("typescript".into())
+    );
+    assert_eq!(
+        parser::detect_language(Path::new("baz.rs")),
+        Some("rust".into())
+    );
+    assert_eq!(
+        parser::detect_language(Path::new("qux.go")),
+        Some("go".into())
+    );
+    assert_eq!(
+        parser::detect_language(Path::new("main.java")),
+        Some("java".into())
+    );
+    assert_eq!(
+        parser::detect_language(Path::new("lib.c")),
+        Some("c".into())
+    );
+    assert_eq!(
+        parser::detect_language(Path::new("lib.cpp")),
+        Some("cpp".into())
+    );
+    assert_eq!(
+        parser::detect_language(Path::new("gem.rb")),
+        Some("ruby".into())
+    );
     assert_eq!(parser::detect_language(Path::new("readme.md")), None);
 }
 
@@ -171,10 +234,16 @@ fn test_skeleton_generation() {
     let skel = compressor::skeleton(&source, &symbols, true);
 
     // Skeleton should be shorter than source
-    assert!(skel.len() < source.len(), "Skeleton should be shorter than source");
+    assert!(
+        skel.len() < source.len(),
+        "Skeleton should be shorter than source"
+    );
 
     // Should contain function signatures
-    assert!(skel.contains("calculate_total"), "Skeleton should contain function name");
+    assert!(
+        skel.contains("calculate_total"),
+        "Skeleton should contain function name"
+    );
 }
 
 #[test]
@@ -192,7 +261,10 @@ fn test_compress_context() {
     let all_symbols = store.get_all_symbols().unwrap();
     let compressed = compressor::compress_context(&all_symbols, "calculate total price", 4000);
 
-    assert!(!compressed.is_empty(), "Compressed context should not be empty");
+    assert!(
+        !compressed.is_empty(),
+        "Compressed context should not be empty"
+    );
     // Should prioritize symbols related to "calculate" and "total"
     assert!(
         compressed.contains("calculate_total") || compressed.contains("total"),
@@ -287,8 +359,12 @@ fn test_index_directory() {
     let config = Config::default();
     let root = fixture_path("python_project");
 
-    let count = indexer::index_directory(&root, &store, &config).unwrap();
-    assert!(count >= 3, "Should index at least 3 Python files, got {}", count);
+    let summary = indexer::index_directory(&root, &store, &config).unwrap();
+    assert!(
+        summary.indexed >= 3,
+        "Should index at least 3 Python files, got {}",
+        summary.indexed
+    );
 
     let stats = store.get_stats().unwrap();
     assert!(stats.symbol_count > 0);
@@ -301,8 +377,12 @@ fn test_index_typescript_project() {
     let config = Config::default();
     let root = fixture_path("typescript_project");
 
-    let count = indexer::index_directory(&root, &store, &config).unwrap();
-    assert!(count >= 2, "Should index at least 2 TypeScript files, got {}", count);
+    let summary = indexer::index_directory(&root, &store, &config).unwrap();
+    assert!(
+        summary.indexed >= 2,
+        "Should index at least 2 TypeScript files, got {}",
+        summary.indexed
+    );
 
     let stats = store.get_stats().unwrap();
     assert!(stats.symbol_count > 0);
@@ -315,13 +395,19 @@ fn test_index_jit_hash_skip() {
     let root = fixture_path("python_project");
 
     // First index
-    let count1 = indexer::index_directory(&root, &store, &config).unwrap();
-    assert!(count1 > 0);
+    let summary1 = indexer::index_directory(&root, &store, &config).unwrap();
+    assert!(summary1.indexed > 0);
 
     // Second index should skip (JIT hash check)
-    let count2 = indexer::index_directory(&root, &store, &config).unwrap();
-    // Count should be 0 since files haven't changed
-    assert_eq!(count2, 0, "Second index should skip unchanged files");
+    let summary2 = indexer::index_directory(&root, &store, &config).unwrap();
+    assert_eq!(
+        summary2.indexed, 0,
+        "Second index should not rewrite unchanged files"
+    );
+    assert!(
+        summary2.unchanged >= summary1.indexed,
+        "Expected unchanged count to reflect previously indexed files"
+    );
 }
 
 // ─── Config tests ───────────────────────────────────────────────────
@@ -331,6 +417,7 @@ fn test_config_defaults() {
     let config = Config::default();
     assert!(config.index.languages.contains(&"python".to_string()));
     assert!(config.index.languages.contains(&"typescript".to_string()));
+    assert!(config.index.languages.contains(&"tsx".to_string()));
     assert!(config.index.languages.contains(&"rust".to_string()));
     assert_eq!(config.compression.default_token_budget, 4000);
     assert!(config.watcher.enabled);
@@ -352,6 +439,22 @@ fn test_config_roundtrip() {
     );
 }
 
+#[test]
+fn test_config_load_migrates_legacy_languages() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".forgeindex")).unwrap();
+    std::fs::write(
+        dir.path().join(".forgeindex/config.toml"),
+        r#"[index]
+languages = ["python", "typescript", "javascript", "rust", "go", "java", "c", "cpp", "ruby"]
+"#,
+    )
+    .unwrap();
+
+    let loaded = Config::load(dir.path()).unwrap();
+    assert!(loaded.index.languages.contains(&"tsx".to_string()));
+}
+
 // ─── End-to-end pipeline test ───────────────────────────────────────
 
 #[test]
@@ -361,13 +464,13 @@ fn test_full_pipeline() {
 
     // 1. Index Python project
     let py_root = fixture_path("python_project");
-    let py_count = indexer::index_directory(&py_root, &store, &config).unwrap();
-    assert!(py_count > 0);
+    let py_summary = indexer::index_directory(&py_root, &store, &config).unwrap();
+    assert!(py_summary.indexed > 0);
 
     // 2. Index TypeScript project
     let ts_root = fixture_path("typescript_project");
-    let ts_count = indexer::index_directory(&ts_root, &store, &config).unwrap();
-    assert!(ts_count > 0);
+    let ts_summary = indexer::index_directory(&ts_root, &store, &config).unwrap();
+    assert!(ts_summary.indexed > 0);
 
     // 3. Query symbols
     let results = store.search_symbols("User", 10).unwrap();
@@ -391,7 +494,13 @@ fn test_full_pipeline() {
     assert!(!compressed.is_empty());
 
     // 8. Get skeleton
-    let _utils_symbols = store.get_file_symbols(&fixture_path("python_project/utils.py").to_string_lossy().replace('\\', "/")).unwrap();
+    let _utils_symbols = store
+        .get_file_symbols(
+            &fixture_path("python_project/utils.py")
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+        .unwrap();
     // The path stored might be different, so let's search from all files
     let stats = store.get_stats().unwrap();
     assert!(stats.file_count > 0);
