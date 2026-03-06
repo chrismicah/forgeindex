@@ -6,6 +6,7 @@ fn default_languages() -> Vec<String> {
     vec![
         "python".into(),
         "typescript".into(),
+        "tsx".into(),
         "javascript".into(),
         "rust".into(),
         "go".into(),
