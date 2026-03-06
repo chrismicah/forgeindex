@@ -27,63 +27,6 @@ fn is_hidden_component(component: &std::ffi::OsStr) -> bool {
         .starts_with('.')
 }
 
-/// Check if a file should be indexed, using the RELATIVE path for all checks.
-fn should_index(rel_path: &Path, full_path: &Path, config: &Config, excludes: &GlobSet) -> bool {
-    // Check file extension / language support
-    let lang = match parser::detect_language(full_path) {
-        Some(l) => l,
-        None => return false,
-    };
-
-    // Swift not yet supported at runtime
-    if lang == "swift" {
-        return false;
-    }
-
-    // Check if language is enabled
-    if !config.index.languages.contains(&lang) {
-        return false;
-    }
-
-    // Check file size
-    if let Ok(meta) = std::fs::metadata(full_path) {
-        if meta.len() > config.index.max_file_size_kb * 1024 {
-            return false;
-        }
-    }
-
-    // Check exclusion patterns against RELATIVE path (not absolute)
-    let rel_str = rel_path.to_string_lossy().replace('\\', "/");
-    if excludes.is_match(&rel_str) {
-        return false;
-    }
-
-    // Skip test files if configured
-    if !config.index.include_tests {
-        let name = full_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        if name.starts_with("test_")
-            || name.ends_with("_test.py")
-            || name.ends_with(".test.ts")
-            || name.ends_with(".test.tsx")
-            || name.ends_with(".test.js")
-            || name.ends_with(".test.jsx")
-            || name.ends_with(".spec.ts")
-            || name.ends_with(".spec.tsx")
-            || name.ends_with(".spec.js")
-            || name.ends_with(".spec.jsx")
-            || name.ends_with("_test.go")
-            || name.ends_with("_test.rs")
-        {
-            return false;
-        }
-    }
-
-    true
-}
-
 /// Directories to always skip during traversal (never descend into these).
 fn should_skip_dir(dir_name: &str) -> bool {
     matches!(
@@ -111,97 +54,175 @@ fn should_skip_dir(dir_name: &str) -> bool {
     )
 }
 
+/// Check why a file should or shouldn't be indexed.
+/// Returns Some(reason) if skipped, None if it should be indexed.
+fn skip_reason(rel_path: &Path, full_path: &Path, config: &Config, excludes: &GlobSet) -> Option<String> {
+    // Check file extension / language support
+    let lang = match parser::detect_language(full_path) {
+        Some(l) => l,
+        None => {
+            let ext = full_path.extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_else(|| "none".to_string());
+            return Some(format!("unsupported extension: .{}", ext));
+        }
+    };
+
+    // Swift not yet supported at runtime
+    if lang == "swift" {
+        return Some("swift not yet supported".to_string());
+    }
+
+    // Check if language is enabled
+    if !config.index.languages.contains(&lang) {
+        return Some(format!("language '{}' not in config languages list {:?}", lang, config.index.languages));
+    }
+
+    // Check file size
+    if let Ok(meta) = std::fs::metadata(full_path) {
+        if meta.len() > config.index.max_file_size_kb * 1024 {
+            return Some(format!("file too large: {} KB > {} KB limit",
+                meta.len() / 1024, config.index.max_file_size_kb));
+        }
+    }
+
+    // Check exclusion patterns against RELATIVE path
+    let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+    if excludes.is_match(&rel_str) {
+        return Some(format!("matched exclude pattern (rel: {})", rel_str));
+    }
+
+    // Skip test files if configured
+    if !config.index.include_tests {
+        let name = full_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if name.starts_with("test_")
+            || name.ends_with("_test.py")
+            || name.ends_with(".test.ts")
+            || name.ends_with(".test.tsx")
+            || name.ends_with(".test.js")
+            || name.ends_with(".test.jsx")
+            || name.ends_with(".spec.ts")
+            || name.ends_with(".spec.tsx")
+            || name.ends_with(".spec.js")
+            || name.ends_with(".spec.jsx")
+            || name.ends_with("_test.go")
+            || name.ends_with("_test.rs")
+        {
+            return Some(format!("test file: {}", name));
+        }
+    }
+
+    None
+}
+
 /// Index all supported files in a directory. Returns the count of files indexed.
 pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<usize> {
     let excludes = build_exclude_set(&config.index.exclude_patterns);
     let mut count = 0;
-    let mut skipped_dirs = 0;
-    let mut skipped_files = 0;
-    let mut errors = 0;
+    let mut skipped_hidden = 0;
+    let mut skipped_excluded_dir = 0;
+    let mut skipped_filter = 0;
+    let mut walk_errors = 0;
+    let mut total_entries = 0;
+    let mut total_files = 0;
 
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter();
 
+    debug!("Walking directory: {}", root.display());
+    debug!("Config languages: {:?}", config.index.languages);
+
     for entry_result in walker {
+        total_entries += 1;
+
         let entry = match entry_result {
             Ok(e) => e,
             Err(e) => {
-                // Log walkdir errors instead of silently swallowing them
                 if let Some(path) = e.path() {
-                    debug!("Walk error at {}: {}", path.display(), e);
+                    debug!("WALK_ERROR at {}: {}", path.display(), e);
                 } else {
-                    debug!("Walk error: {}", e);
+                    debug!("WALK_ERROR: {}", e);
                 }
-                errors += 1;
+                walk_errors += 1;
                 continue;
             }
         };
 
         let path = entry.path();
 
-        // For directories: check if we should skip entirely (prune)
-        if entry.file_type().is_dir() {
-            if let Some(dir_name) = path.file_name() {
-                let name = dir_name.to_string_lossy();
-                // Skip hidden directories (relative to root)
-                if path != root && (name.starts_with('.') || should_skip_dir(&name)) {
-                    skipped_dirs += 1;
-                    // Note: we can't skip with filter_entry since we're using into_iter()
-                    // but walkdir will still descend. We handle this by checking rel_path below.
-                    continue;
-                }
-            }
-            continue;
-        }
-
+        // Skip non-files
         if !path.is_file() {
             continue;
         }
+
+        total_files += 1;
 
         // Get relative path
         let rel_path = match path.strip_prefix(root) {
             Ok(r) => r,
             Err(_) => {
-                debug!("Could not compute relative path for {}", path.display());
+                debug!("SKIP_NO_REL: {} (could not strip prefix {})", path.display(), root.display());
                 continue;
             }
         };
 
         // Skip files under hidden/excluded directories (relative to root)
-        let in_excluded_dir = rel_path.components().any(|c| {
+        let mut excluded_by: Option<String> = None;
+        for c in rel_path.components() {
             let s = c.as_os_str().to_string_lossy();
-            is_hidden_component(c.as_os_str()) || should_skip_dir(&s)
-        });
-        if in_excluded_dir {
+            if is_hidden_component(c.as_os_str()) {
+                excluded_by = Some(format!("hidden component: {}", s));
+                break;
+            }
+            if should_skip_dir(&s) {
+                excluded_by = Some(format!("excluded dir: {}", s));
+                break;
+            }
+        }
+        if let Some(reason) = excluded_by {
+            debug!("SKIP_DIR: {} ({})", rel_path.display(), reason);
+            skipped_excluded_dir += 1;
             continue;
         }
 
-        if !should_index(rel_path, path, config, &excludes) {
-            skipped_files += 1;
+        // Check if file should be indexed
+        if let Some(reason) = skip_reason(rel_path, path, config, &excludes) {
+            debug!("SKIP_FILTER: {} ({})", rel_path.display(), reason);
+            skipped_filter += 1;
             continue;
         }
 
         match index_file(root, path, store, config) {
-            Ok(true) => count += 1,
-            Ok(false) => {} // skipped, unchanged hash
+            Ok(true) => {
+                debug!("INDEXED: {} ", rel_path.display());
+                count += 1;
+            }
+            Ok(false) => {
+                debug!("UNCHANGED: {}", rel_path.display());
+            }
             Err(e) => {
-                debug!("Skipping {}: {}", rel_path.display(), e);
-                errors += 1;
+                debug!("INDEX_ERROR: {} ({})", rel_path.display(), e);
+                walk_errors += 1;
             }
         }
     }
 
-    if count == 0 {
-        // Emit diagnostic info when nothing was indexed
+    info!(
+        "Indexed {} files (walked {} entries, {} files, skipped: {} hidden, {} excluded-dir, {} filtered, {} errors)",
+        count, total_entries, total_files, skipped_hidden, skipped_excluded_dir, skipped_filter, walk_errors
+    );
+
+    if count == 0 && total_files > 0 {
         warn!(
-            "Indexed 0 files (skipped {} dirs, {} files, {} errors). \
-             Check that source files exist and languages are enabled in config.",
-            skipped_dirs, skipped_files, errors
+            "0 files indexed out of {} files found! Check language config and exclude patterns.",
+            total_files
         );
     }
 
-    info!("Indexed {} files", count);
     Ok(count)
 }
 
