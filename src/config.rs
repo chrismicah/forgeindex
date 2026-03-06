@@ -50,7 +50,7 @@ fn default_max_file_size_kb() -> u64 {
 }
 
 fn default_token_budget() -> usize {
-    4000
+    32000
 }
 
 fn default_skeleton_threshold() -> usize {

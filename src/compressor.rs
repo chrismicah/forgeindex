@@ -76,11 +76,8 @@ pub fn skeleton(source: &str, symbols: &[SymbolRecord], aggregate_imports: bool)
     output
 }
 
-/// TF-IDF scoring for symbols against a query.
-pub fn tfidf_rank(
-    symbols: &[SymbolRecord],
-    query: &str,
-) -> Vec<(usize, f64)> {
+/// TF-IDF scoring for symbols against a query, with file-path and multi-term boosting.
+pub fn tfidf_rank(symbols: &[SymbolRecord], query: &str) -> Vec<(usize, f64)> {
     let query_terms = tokenize(query);
     if query_terms.is_empty() {
         return symbols.iter().enumerate().map(|(i, _)| (i, 0.0)).collect();
@@ -88,7 +85,7 @@ pub fn tfidf_rank(
 
     let total_docs = symbols.len() as f64;
 
-    // Compute document frequency for each term
+    // Tokenize each symbol: name + signature + docstring + file path
     let mut df: HashMap<String, usize> = HashMap::new();
     let symbol_tokens: Vec<Vec<String>> = symbols
         .iter()
@@ -96,6 +93,8 @@ pub fn tfidf_rank(
             let mut text = s.name.clone();
             text.push(' ');
             text.push_str(&s.signature);
+            text.push(' ');
+            text.push_str(&s.file_path);
             if let Some(ref doc) = s.docstring {
                 text.push(' ');
                 text.push_str(doc);
@@ -105,8 +104,7 @@ pub fn tfidf_rank(
         .collect();
 
     for tokens in &symbol_tokens {
-        let unique: std::collections::HashSet<&str> =
-            tokens.iter().map(|s| s.as_str()).collect();
+        let unique: std::collections::HashSet<&str> = tokens.iter().map(|s| s.as_str()).collect();
         for term in unique {
             *df.entry(term.to_string()).or_insert(0) += 1;
         }
@@ -118,6 +116,7 @@ pub fn tfidf_rank(
         let mut score = 0.0f64;
         let doc_len = tokens.len().max(1) as f64;
 
+        let mut terms_matched = 0usize;
         for qt in &query_terms {
             let tf = tokens.iter().filter(|t| *t == qt).count() as f64 / doc_len;
             let idf = if let Some(&d) = df.get(qt) {
@@ -125,7 +124,11 @@ pub fn tfidf_rank(
             } else {
                 0.0
             };
-            score += tf * idf;
+            let term_score = tf * idf;
+            if term_score > 0.0 {
+                terms_matched += 1;
+            }
+            score += term_score;
         }
 
         // Boost exact name matches
@@ -136,6 +139,21 @@ pub fn tfidf_rank(
             } else if name_lower.contains(qt.as_str()) {
                 score += 2.0;
             }
+        }
+
+        // Boost file path matches (symbols in relevant directories)
+        let path_lower = symbols[i].file_path.to_lowercase();
+        for qt in &query_terms {
+            if path_lower.contains(qt.as_str()) {
+                score += 1.5;
+            }
+        }
+
+        // Multi-term coverage bonus: symbols matching MORE query terms rank higher.
+        // This reduces tangential matches that only hit one common word.
+        if query_terms.len() > 1 && terms_matched > 1 {
+            let coverage = terms_matched as f64 / query_terms.len() as f64;
+            score *= 1.0 + coverage;
         }
 
         scores.push((i, score));
@@ -173,11 +191,7 @@ pub fn greedy_knapsack<'a>(
 }
 
 /// Compress context: TF-IDF rank + greedy knapsack, formatted output.
-pub fn compress_context(
-    symbols: &[SymbolRecord],
-    query: &str,
-    token_budget: usize,
-) -> String {
+pub fn compress_context(symbols: &[SymbolRecord], query: &str, token_budget: usize) -> String {
     let ranked = tfidf_rank(symbols, query);
     let selected = greedy_knapsack(symbols, &ranked, token_budget);
 
@@ -204,11 +218,7 @@ pub fn compress_context(
 }
 
 /// Pack entire repo into a single artifact within token budget.
-pub fn pack_repo(
-    symbols: &[SymbolRecord],
-    token_budget: usize,
-    format: &str,
-) -> String {
+pub fn pack_repo(symbols: &[SymbolRecord], token_budget: usize, format: &str) -> String {
     // Group by file
     let mut by_file: std::collections::BTreeMap<&str, Vec<&SymbolRecord>> =
         std::collections::BTreeMap::new();
@@ -259,7 +269,11 @@ fn pack_json(
     let mut used_tokens = 20; // overhead for JSON structure
 
     for (file, syms) in by_file {
-        let content: String = syms.iter().map(|s| s.signature.as_str()).collect::<Vec<_>>().join("\n");
+        let content: String = syms
+            .iter()
+            .map(|s| s.signature.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         let cost = estimate_tokens(&content) + 20; // per-file JSON overhead
         if used_tokens + cost > token_budget {
             break;

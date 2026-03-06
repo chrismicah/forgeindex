@@ -79,12 +79,8 @@ fn resolve_git_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
     }
 
     // .git is a file (worktree or submodule) — read the gitdir pointer
-    let content = std::fs::read_to_string(&git_path)
-        .context("Failed to read .git file")?;
-    let gitdir = content
-        .strip_prefix("gitdir: ")
-        .unwrap_or(&content)
-        .trim();
+    let content = std::fs::read_to_string(&git_path).context("Failed to read .git file")?;
+    let gitdir = content.strip_prefix("gitdir: ").unwrap_or(&content).trim();
     let resolved = if Path::new(gitdir).is_absolute() {
         std::path::PathBuf::from(gitdir)
     } else {
@@ -185,8 +181,11 @@ pub fn uninstall_hooks(repo_path: &Path, hook_types: &[String]) -> Result<()> {
             }
             if skip {
                 // Skip until we find a line that doesn't look like part of our hook
-                if line.starts_with('#') || line.starts_with("if ") || line.starts_with("fi")
-                    || line.contains("forgeindex") || line.trim().is_empty()
+                if line.starts_with('#')
+                    || line.starts_with("if ")
+                    || line.starts_with("fi")
+                    || line.contains("forgeindex")
+                    || line.trim().is_empty()
                 {
                     continue;
                 }

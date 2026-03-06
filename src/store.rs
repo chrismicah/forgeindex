@@ -190,18 +190,64 @@ impl Store {
     }
 
     pub fn search_symbols(&self, query: &str, max_results: usize) -> Result<Vec<SymbolRecord>> {
-        let pattern = format!("%{}%", query);
-        let mut stmt = self.conn.prepare(
+        // Tokenize query into words for multi-word search
+        let words: Vec<&str> = query.split_whitespace().collect();
+
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build WHERE clause: OR across words so "authentication login" finds symbols
+        // matching either term. Rank by how many terms match.
+        let mut where_parts = Vec::new();
+        let mut param_values: Vec<String> = Vec::new();
+
+        for word in &words {
+            let idx = param_values.len();
+            let p = idx + 1; // SQLite params are 1-indexed
+            where_parts.push(format!(
+                "(s.name LIKE ?{p} OR s.signature LIKE ?{p} OR COALESCE(s.docstring,'') LIKE ?{p})"
+            ));
+            param_values.push(format!("%{}%", word));
+        }
+
+        let where_clause = where_parts.join(" OR ");
+
+        // Ranking: exact name match > symbols matching more words > prefix match
+        let mut rank_parts = Vec::new();
+        let exact_idx = param_values.len() + 1;
+        param_values.push(query.to_string());
+        rank_parts.push(format!("CASE WHEN s.name = ?{} THEN 0 ELSE 10 END", exact_idx));
+
+        // Boost symbols that match more words (subtract 3 for each matching word)
+        for (i, _word) in words.iter().enumerate() {
+            let p = i + 1;
+            rank_parts.push(format!(
+                "CASE WHEN s.name LIKE ?{p} THEN -3 WHEN s.signature LIKE ?{p} THEN -1 ELSE 0 END"
+            ));
+        }
+
+        let rank_expr = rank_parts.join(" + ");
+        let limit_idx = param_values.len() + 1;
+        param_values.push(max_results.to_string());
+
+        let sql = format!(
             "SELECT s.id, f.path, s.name, s.kind, s.visibility, s.signature, s.docstring, \
              s.byte_start, s.byte_end, s.parent_symbol_id \
              FROM symbols s JOIN files f ON s.file_id = f.id \
-             WHERE s.name LIKE ?1 OR s.signature LIKE ?1 \
-             ORDER BY CASE WHEN s.name = ?2 THEN 0 \
-                          WHEN s.name LIKE ?2 || '%' THEN 1 \
-                          ELSE 2 END \
-             LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(params![pattern, query, max_results as i64], |row| {
+             WHERE {} \
+             ORDER BY {} \
+             LIMIT ?{}",
+            where_clause, rank_expr, limit_idx
+        );
+
+        let params: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params.as_slice(), |row| {
             Ok(SymbolRecord {
                 id: row.get(0)?,
                 file_path: row.get(1)?,
@@ -325,6 +371,57 @@ impl Store {
                 path: row.get(1)?,
                 language: row.get(2)?,
                 hash: row.get(3)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    pub fn search_imports(&self, query: &str, max_results: usize) -> Result<Vec<ImportRecord>> {
+        let words: Vec<&str> = query.split_whitespace().collect();
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut where_parts = Vec::new();
+        let mut param_values: Vec<String> = Vec::new();
+
+        for word in &words {
+            let p = param_values.len() + 1;
+            where_parts.push(format!(
+                "(i.raw_text LIKE ?{p} OR COALESCE(i.source_module,'') LIKE ?{p})"
+            ));
+            param_values.push(format!("%{}%", word));
+        }
+
+        let limit_idx = param_values.len() + 1;
+        param_values.push(max_results.to_string());
+
+        let sql = format!(
+            "SELECT f.path, i.raw_text, i.source_module \
+             FROM imports i JOIN files f ON i.file_id = f.id \
+             WHERE {} \
+             ORDER BY f.path \
+             LIMIT ?{}",
+            where_parts.join(" OR "),
+            limit_idx
+        );
+
+        let params: Vec<&dyn rusqlite::types::ToSql> = param_values
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok(ImportRecord {
+                file_path: row.get(0)?,
+                raw_text: row.get(1)?,
+                source_module: row.get(2)?,
             })
         })?;
 

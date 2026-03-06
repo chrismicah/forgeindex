@@ -169,8 +169,9 @@ impl McpServer {
 
         match name {
             "map_overview" => {
-                let max_chars = args["max_chars"].as_u64().unwrap_or(8000) as usize;
-                self.tool_map_overview(&store, max_chars)
+                let max_chars = args["max_chars"].as_u64().unwrap_or(120000) as usize;
+                let detail = args["detail"].as_str().unwrap_or("summary");
+                self.tool_map_overview(&store, max_chars, detail)
             }
             "find_symbol" => {
                 let sym_name = args["name"]
@@ -183,7 +184,8 @@ impl McpServer {
                 let symbol = args["symbol"]
                     .as_str()
                     .ok_or_else(|| anyhow!("missing 'symbol' parameter"))?;
-                self.tool_read_source(&store, symbol)
+                let max_chars = args["max_chars"].as_u64().unwrap_or(20000) as usize;
+                self.tool_read_source(&store, symbol, max_chars)
             }
             "search_symbols" => {
                 let query = args["query"]
@@ -234,6 +236,13 @@ impl McpServer {
                 let format = args["format"].as_str().unwrap_or("xml");
                 self.tool_pack_repo(&store, budget, format)
             }
+            "search_imports" => {
+                let query = args["query"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("missing 'query' parameter"))?;
+                let max_results = args["max_results"].as_u64().unwrap_or(30) as usize;
+                self.tool_search_imports(&store, query, max_results)
+            }
             "index_status" => self.tool_index_status(&store),
             "reindex" => {
                 let path = args["path"].as_str();
@@ -243,68 +252,153 @@ impl McpServer {
         }
     }
 
-    fn tool_map_overview(&self, store: &Store, max_chars: usize) -> Result<String> {
+    fn tool_map_overview(&self, store: &Store, max_chars: usize, detail: &str) -> Result<String> {
         let symbols = store.get_all_symbols()?;
-        let mut output = String::new();
-        let mut current_file = String::new();
+        if symbols.is_empty() {
+            return Ok("No symbols indexed. Run `forgeindex reindex` first.".to_string());
+        }
 
+        // Group symbols by file
+        let mut by_file: std::collections::BTreeMap<&str, Vec<&crate::store::SymbolRecord>> =
+            std::collections::BTreeMap::new();
         for sym in &symbols {
-            if sym.parent_id.is_some() {
-                continue; // Skip children, we'll show them under parents
-            }
-
-            if sym.file_path != current_file {
-                current_file = sym.file_path.clone();
-                output.push_str(&format!("\n{}:\n", current_file));
-            }
-
-            let kind_prefix = match sym.kind.as_str() {
-                "function" => "fn",
-                "class" => "class",
-                "method" => "  fn",
-                "type" => "type",
-                "const" => "const",
-                "interface" => "interface",
-                "module" => "mod",
-                _ => "",
-            };
-
-            let vis = match sym.visibility.as_str() {
-                "public" => "+",
-                "private" => "-",
-                _ => "~",
-            };
-
-            output.push_str(&format!("  {} {} {}\n", vis, kind_prefix, sym.name));
-
-            // Show children
-            let children: Vec<&_> = symbols
-                .iter()
-                .filter(|s| s.parent_id == Some(sym.id))
-                .collect();
-            for child in children {
-                output.push_str(&format!(
-                    "    {} fn {}\n",
-                    match child.visibility.as_str() {
-                        "public" => "+",
-                        "private" => "-",
-                        _ => "~",
-                    },
-                    child.name
-                ));
-            }
-
-            if output.len() > max_chars {
-                output.push_str("\n... (truncated)\n");
-                break;
-            }
+            by_file.entry(&sym.file_path).or_default().push(sym);
         }
 
-        if output.is_empty() {
-            output = "No symbols indexed. Run `forgeindex reindex` first.".to_string();
-        }
+        let stats = store.get_stats()?;
 
-        Ok(output)
+        match detail {
+            "tree" => {
+                // Compact: directory tree with file symbol counts
+                let mut output = format!(
+                    "Codebase: {} files, {} symbols, {} imports\n\n",
+                    stats.file_count, stats.symbol_count, stats.import_count
+                );
+
+                // Build directory tree
+                let mut dirs: std::collections::BTreeMap<String, Vec<(&str, usize)>> =
+                    std::collections::BTreeMap::new();
+                for (file, syms) in &by_file {
+                    let dir = std::path::Path::new(file)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| ".".to_string());
+                    let top_level = syms.iter().filter(|s| s.parent_id.is_none()).count();
+                    dirs.entry(dir).or_default().push((file, top_level));
+                }
+
+                for (dir, files) in &dirs {
+                    let total_syms: usize = files.iter().map(|(_, c)| c).sum();
+                    output.push_str(&format!(
+                        "{}/  ({} files, {} symbols)\n",
+                        dir,
+                        files.len(),
+                        total_syms
+                    ));
+                    if output.len() > max_chars {
+                        output.push_str("... (truncated)\n");
+                        break;
+                    }
+                }
+
+                Ok(output)
+            }
+
+            "summary" => {
+                // Medium: file paths + top-level symbol names (no signatures)
+                let mut output = format!(
+                    "Codebase: {} files, {} symbols, {} imports\n",
+                    stats.file_count, stats.symbol_count, stats.import_count
+                );
+
+                for (file, syms) in &by_file {
+                    output.push_str(&format!("\n{}:\n", file));
+
+                    for sym in syms {
+                        if sym.parent_id.is_some() {
+                            continue;
+                        }
+
+                        let kind_prefix = match sym.kind.as_str() {
+                            "function" => "fn",
+                            "class" => "class",
+                            "method" => "  fn",
+                            "type" => "type",
+                            "const" => "const",
+                            "interface" => "iface",
+                            "module" => "mod",
+                            _ => "",
+                        };
+
+                        let vis = match sym.visibility.as_str() {
+                            "public" => "+",
+                            "private" => "-",
+                            _ => "~",
+                        };
+
+                        output.push_str(&format!("  {} {} {}\n", vis, kind_prefix, sym.name));
+
+                        // Show children names (no signatures) for classes
+                        if sym.kind == "class" {
+                            let children: Vec<&&_> = syms
+                                .iter()
+                                .filter(|s| s.parent_id == Some(sym.id))
+                                .collect();
+                            for child in children {
+                                let cvis = match child.visibility.as_str() {
+                                    "public" => "+",
+                                    "private" => "-",
+                                    _ => "~",
+                                };
+                                output.push_str(&format!("    {} fn {}\n", cvis, child.name));
+                            }
+                        }
+                    }
+
+                    if output.len() > max_chars {
+                        output.push_str("\n... (truncated)\n");
+                        break;
+                    }
+                }
+
+                Ok(output)
+            }
+
+            _ => {
+                // "full": original behavior — symbol names + signatures + children
+                let mut output = format!(
+                    "Codebase: {} files, {} symbols, {} imports\n",
+                    stats.file_count, stats.symbol_count, stats.import_count
+                );
+
+                for (file, syms) in &by_file {
+                    output.push_str(&format!("\n{}:\n", file));
+
+                    for sym in syms {
+                        if sym.parent_id.is_some() {
+                            continue;
+                        }
+
+                        output.push_str(&format!("  {}\n", sym.signature));
+
+                        let children: Vec<&&_> = syms
+                            .iter()
+                            .filter(|s| s.parent_id == Some(sym.id))
+                            .collect();
+                        for child in children {
+                            output.push_str(&format!("    {}\n", child.signature));
+                        }
+                    }
+
+                    if output.len() > max_chars {
+                        output.push_str("\n... (truncated)\n");
+                        break;
+                    }
+                }
+
+                Ok(output)
+            }
+        }
     }
 
     fn tool_find_symbol(&self, store: &Store, name: &str, kind: Option<&str>) -> Result<String> {
@@ -333,7 +427,12 @@ impl McpServer {
         Ok(output)
     }
 
-    fn tool_read_source(&self, store: &Store, symbol_name: &str) -> Result<String> {
+    fn tool_read_source(
+        &self,
+        store: &Store,
+        symbol_name: &str,
+        max_chars: usize,
+    ) -> Result<String> {
         let results = store.find_symbol(symbol_name, None)?;
         if results.is_empty() {
             return Err(anyhow!("SYMBOL_NOT_FOUND: {}", symbol_name));
@@ -347,11 +446,35 @@ impl McpServer {
         let start = sym.byte_start.min(source.len());
         let end = sym.byte_end.min(source.len());
         let fragment = &source[start..end];
+        let total_chars = fragment.len();
 
-        Ok(format!(
-            "// {}:{}-{}\n{}",
-            sym.file_path, sym.byte_start, sym.byte_end, fragment
-        ))
+        if total_chars <= max_chars {
+            Ok(format!(
+                "// {}:{}-{}\n{}",
+                sym.file_path, sym.byte_start, sym.byte_end, fragment
+            ))
+        } else {
+            // Truncate but keep the beginning and end of the symbol for context
+            let head_budget = max_chars * 3 / 4;
+            let tail_budget = max_chars - head_budget;
+            let head = &fragment[..head_budget.min(fragment.len())];
+            let tail_start = fragment.len().saturating_sub(tail_budget);
+            let tail = &fragment[tail_start..];
+            let omitted = total_chars - head_budget - tail_budget;
+
+            Ok(format!(
+                "// {}:{}-{} ({} chars total, showing first {} + last {})\n{}\n\n// ... ({} chars omitted) ...\n\n{}",
+                sym.file_path,
+                sym.byte_start,
+                sym.byte_end,
+                total_chars,
+                head_budget,
+                tail_budget,
+                head,
+                omitted,
+                tail
+            ))
+        }
     }
 
     fn tool_search_symbols(
@@ -481,6 +604,36 @@ impl McpServer {
         Ok(compressor::pack_repo(&all_symbols, budget, format))
     }
 
+    fn tool_search_imports(
+        &self,
+        store: &Store,
+        query: &str,
+        max_results: usize,
+    ) -> Result<String> {
+        let results = store.search_imports(query, max_results)?;
+        if results.is_empty() {
+            return Ok(format!("No imports matching: {}", query));
+        }
+
+        // Group by file for compact output
+        let mut by_file: std::collections::BTreeMap<&str, Vec<&crate::store::ImportRecord>> =
+            std::collections::BTreeMap::new();
+        for imp in &results {
+            by_file.entry(&imp.file_path).or_default().push(imp);
+        }
+
+        let mut output = format!("{} imports across {} files:\n\n", results.len(), by_file.len());
+        for (file, imps) in &by_file {
+            output.push_str(&format!("{}:\n", file));
+            for imp in imps {
+                output.push_str(&format!("  {}\n", imp.raw_text));
+            }
+            output.push('\n');
+        }
+
+        Ok(output)
+    }
+
     fn tool_index_status(&self, store: &Store) -> Result<String> {
         let stats = store.get_stats()?;
         let mut output = String::new();
@@ -518,11 +671,12 @@ impl McpServer {
         vec![
             json!({
                 "name": "map_overview",
-                "description": "Get a hierarchical text tree of all public symbols in the codebase.",
+                "description": "Get a map of the codebase. Use detail='tree' for a compact directory overview (~2K tokens for any codebase), 'summary' for file paths + symbol names (~15K tokens for large codebases), or 'full' for complete signatures.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "max_chars": { "type": "integer", "default": 8000, "description": "Maximum characters in the output" }
+                        "max_chars": { "type": "integer", "default": 120000, "description": "Maximum characters in the output" },
+                        "detail": { "type": "string", "enum": ["tree","summary","full"], "default": "summary", "description": "Level of detail: tree (dirs only), summary (symbol names), full (signatures)" }
                     }
                 }
             }),
@@ -540,18 +694,19 @@ impl McpServer {
             }),
             json!({
                 "name": "read_source",
-                "description": "Read the full source code of a specific symbol.",
+                "description": "Read the source code of a specific symbol. Large symbols are truncated to max_chars (head + tail) to save tokens.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "symbol": { "type": "string", "description": "Symbol name to read" }
+                        "symbol": { "type": "string", "description": "Symbol name to read" },
+                        "max_chars": { "type": "integer", "default": 20000, "description": "Maximum characters to return. Large symbols show head + tail with omission marker." }
                     },
                     "required": ["symbol"]
                 }
             }),
             json!({
                 "name": "search_symbols",
-                "description": "Fuzzy search for symbols by name or signature.",
+                "description": "Fuzzy search for symbols by name, signature, or docstring. Supports multi-word queries (e.g. 'auth login') by matching all terms.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -614,7 +769,7 @@ impl McpServer {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Natural language or identifier query" },
-                        "token_budget": { "type": "integer", "default": 4000, "description": "Max tokens in response" }
+                        "token_budget": { "type": "integer", "default": 32000, "description": "Max tokens in response" }
                     },
                     "required": ["query"]
                 }
@@ -625,9 +780,21 @@ impl McpServer {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "token_budget": { "type": "integer", "default": 4000, "description": "Max tokens" },
+                        "token_budget": { "type": "integer", "default": 32000, "description": "Max tokens" },
                         "format": { "type": "string", "enum": ["xml","json"], "default": "xml", "description": "Output format" }
                     }
+                }
+            }),
+            json!({
+                "name": "search_imports",
+                "description": "Search import/require/use statements across all indexed files. Find which files import a specific module or package (e.g. 'ai/react', 'stripe', 'prisma').",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query for import text or module name" },
+                        "max_results": { "type": "integer", "default": 30, "description": "Maximum results" }
+                    },
+                    "required": ["query"]
                 }
             }),
             json!({
