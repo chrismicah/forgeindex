@@ -1,0 +1,56 @@
+[package]
+name = "forgeindex"
+version = "0.1.0"
+edition = "2021"
+description = "AST-driven codebase intelligence MCP server for autonomous coding agents"
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "forgeindex"
+path = "src/main.rs"
+
+[dependencies]
+# AST parsing
+tree-sitter = "0.24"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-ruby = "0.23"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Hashing
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# File watching
+notify = "7"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+anyhow = "1"
+walkdir = "2"
+globset = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

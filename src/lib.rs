@@ -1,0 +1,9 @@
+pub mod cli;
+pub mod compressor;
+pub mod config;
+pub mod graph;
+pub mod indexer;
+pub mod mcp;
+pub mod parser;
+pub mod store;
+pub mod watcher;

@@ -1,0 +1,7 @@
+/target
+.forgeindex/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
