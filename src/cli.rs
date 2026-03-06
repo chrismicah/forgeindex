@@ -13,6 +13,10 @@ pub struct Cli {
     /// Project root directory (default: current directory)
     #[arg(short, long, global = true)]
     pub root: Option<String>,
+
+    /// Enable verbose output (show skipped files and diagnostics)
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
 }
 
 #[derive(Subcommand)]

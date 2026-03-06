@@ -21,8 +21,9 @@ fn main() -> Result<()> {
     let config = Config::load(&root).unwrap_or_default();
 
     // Initialize logging
+    let default_level = if cli.verbose { "debug" } else { &config.server.log_level };
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&config.server.log_level));
+        .unwrap_or_else(|_| EnvFilter::new(default_level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
