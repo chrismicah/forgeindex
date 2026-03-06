@@ -21,9 +21,13 @@ fn main() -> Result<()> {
     let config = Config::load(&root).unwrap_or_default();
 
     // Initialize logging
-    let default_level = if cli.verbose { "debug" } else { &config.server.log_level };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
+    let default_level = if cli.verbose {
+        "debug"
+    } else {
+        &config.server.log_level
+    };
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -55,8 +59,11 @@ fn cmd_init(root: &PathBuf, config: &Config) -> Result<()> {
     // Create database and index
     let db_path = Config::db_path(root);
     let store = Store::open(&db_path)?;
-    let count = indexer::index_directory(root, &store, config)?;
-    println!("Indexed {} files.", count);
+    let summary = indexer::index_directory(root, &store, config)?;
+    println!(
+        "Indexed {} files ({} unchanged, {} scanned).",
+        summary.indexed, summary.unchanged, summary.total_files
+    );
 
     // Install git hooks if configured
     if config.git_hooks.auto_install && root.join(".git").exists() {
@@ -106,11 +113,17 @@ fn cmd_reindex(root: &PathBuf, config: &Config, path: Option<&str>) -> Result<()
     let store = Store::open(&db_path)?;
 
     if let Some(p) = path {
-        indexer::index_file(root, &root.join(p), &store, config)?;
-        println!("Re-indexed: {}", p);
+        if indexer::index_file(root, &root.join(p), &store, config)? {
+            println!("Re-indexed: {}", p);
+        } else {
+            println!("Re-index skipped: {} unchanged.", p);
+        }
     } else {
-        let count = indexer::index_directory(root, &store, config)?;
-        println!("Re-indexed {} files.", count);
+        let summary = indexer::index_directory(root, &store, config)?;
+        println!(
+            "Re-indexed {} files ({} unchanged, {} scanned).",
+            summary.indexed, summary.unchanged, summary.total_files
+        );
     }
 
     Ok(())

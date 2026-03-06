@@ -407,7 +407,10 @@ impl McpServer {
         let deps = graph.get_dependencies(symbol, dir);
 
         if deps.is_empty() {
-            return Ok(format!("No {} dependencies found for: {}", direction, symbol));
+            return Ok(format!(
+                "No {} dependencies found for: {}",
+                direction, symbol
+            ));
         }
 
         let mut output = format!("Dependencies ({}) for {}:\n", direction, symbol);
@@ -468,12 +471,7 @@ impl McpServer {
         Ok(output)
     }
 
-    fn tool_compress_context(
-        &self,
-        store: &Store,
-        query: &str,
-        budget: usize,
-    ) -> Result<String> {
+    fn tool_compress_context(&self, store: &Store, query: &str, budget: usize) -> Result<String> {
         let all_symbols = store.get_all_symbols()?;
         Ok(compressor::compress_context(&all_symbols, query, budget))
     }
@@ -498,14 +496,22 @@ impl McpServer {
     }
 
     fn tool_reindex(&self, store: &Store, path: Option<&str>) -> Result<String> {
-        let count = if let Some(p) = path {
+        let message = if let Some(p) = path {
             let indexed = indexer::index_file(&self.root_path, Path::new(p), store, &self.config)?;
-            if indexed { 1 } else { 0 }
+            if indexed {
+                format!("Re-indexed: {}", p)
+            } else {
+                format!("Re-index skipped: {} unchanged.", p)
+            }
         } else {
-            indexer::index_directory(&self.root_path, store, &self.config)?
+            let summary = indexer::index_directory(&self.root_path, store, &self.config)?;
+            format!(
+                "Re-indexed {} files ({} unchanged, {} scanned).",
+                summary.indexed, summary.unchanged, summary.total_files
+            )
         };
 
-        Ok(format!("Re-indexed {} files.", count))
+        Ok(message)
     }
 
     fn tool_definitions(&self) -> Vec<Value> {

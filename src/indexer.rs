@@ -9,6 +9,18 @@ use crate::config::Config;
 use crate::parser;
 use crate::store::Store;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexSummary {
+    pub indexed: usize,
+    pub unchanged: usize,
+    pub total_entries: usize,
+    pub total_files: usize,
+    pub skipped_hidden: usize,
+    pub skipped_excluded_dir: usize,
+    pub skipped_filter: usize,
+    pub walk_errors: usize,
+}
+
 /// Build a GlobSet from exclusion patterns.
 fn build_exclude_set(patterns: &[String]) -> GlobSet {
     let mut builder = GlobSetBuilder::new();
@@ -22,9 +34,7 @@ fn build_exclude_set(patterns: &[String]) -> GlobSet {
 
 /// Check if a relative path component is hidden (starts with '.')
 fn is_hidden_component(component: &std::ffi::OsStr) -> bool {
-    component
-        .to_string_lossy()
-        .starts_with('.')
+    component.to_string_lossy().starts_with('.')
 }
 
 /// Directories to always skip during traversal (never descend into these).
@@ -56,12 +66,18 @@ fn should_skip_dir(dir_name: &str) -> bool {
 
 /// Check why a file should or shouldn't be indexed.
 /// Returns Some(reason) if skipped, None if it should be indexed.
-fn skip_reason(rel_path: &Path, full_path: &Path, config: &Config, excludes: &GlobSet) -> Option<String> {
+fn skip_reason(
+    rel_path: &Path,
+    full_path: &Path,
+    config: &Config,
+    excludes: &GlobSet,
+) -> Option<String> {
     // Check file extension / language support
     let lang = match parser::detect_language(full_path) {
         Some(l) => l,
         None => {
-            let ext = full_path.extension()
+            let ext = full_path
+                .extension()
                 .map(|e| e.to_string_lossy().to_string())
                 .unwrap_or_else(|| "none".to_string());
             return Some(format!("unsupported extension: .{}", ext));
@@ -75,14 +91,20 @@ fn skip_reason(rel_path: &Path, full_path: &Path, config: &Config, excludes: &Gl
 
     // Check if language is enabled
     if !config.index.languages.contains(&lang) {
-        return Some(format!("language '{}' not in config languages list {:?}", lang, config.index.languages));
+        return Some(format!(
+            "language '{}' not in config languages list {:?}",
+            lang, config.index.languages
+        ));
     }
 
     // Check file size
     if let Ok(meta) = std::fs::metadata(full_path) {
         if meta.len() > config.index.max_file_size_kb * 1024 {
-            return Some(format!("file too large: {} KB > {} KB limit",
-                meta.len() / 1024, config.index.max_file_size_kb));
+            return Some(format!(
+                "file too large: {} KB > {} KB limit",
+                meta.len() / 1024,
+                config.index.max_file_size_kb
+            ));
         }
     }
 
@@ -118,10 +140,11 @@ fn skip_reason(rel_path: &Path, full_path: &Path, config: &Config, excludes: &Gl
     None
 }
 
-/// Index all supported files in a directory. Returns the count of files indexed.
-pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<usize> {
+/// Index all supported files in a directory and return a summary.
+pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<IndexSummary> {
     let excludes = build_exclude_set(&config.index.exclude_patterns);
-    let mut count = 0;
+    let mut indexed = 0;
+    let mut unchanged = 0;
     let mut skipped_hidden = 0;
     let mut skipped_excluded_dir = 0;
     let mut skipped_filter = 0;
@@ -129,9 +152,7 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<us
     let mut total_entries = 0;
     let mut total_files = 0;
 
-    let walker = WalkDir::new(root)
-        .follow_links(false)
-        .into_iter();
+    let walker = WalkDir::new(root).follow_links(false).into_iter();
 
     debug!("Walking directory: {}", root.display());
     debug!("Config languages: {:?}", config.index.languages);
@@ -165,17 +186,23 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<us
         let rel_path = match path.strip_prefix(root) {
             Ok(r) => r,
             Err(_) => {
-                debug!("SKIP_NO_REL: {} (could not strip prefix {})", path.display(), root.display());
+                debug!(
+                    "SKIP_NO_REL: {} (could not strip prefix {})",
+                    path.display(),
+                    root.display()
+                );
                 continue;
             }
         };
 
         // Skip files under hidden/excluded directories (relative to root)
         let mut excluded_by: Option<String> = None;
+        let mut hidden_component = false;
         for c in rel_path.components() {
             let s = c.as_os_str().to_string_lossy();
             if is_hidden_component(c.as_os_str()) {
                 excluded_by = Some(format!("hidden component: {}", s));
+                hidden_component = true;
                 break;
             }
             if should_skip_dir(&s) {
@@ -185,7 +212,11 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<us
         }
         if let Some(reason) = excluded_by {
             debug!("SKIP_DIR: {} ({})", rel_path.display(), reason);
-            skipped_excluded_dir += 1;
+            if hidden_component {
+                skipped_hidden += 1;
+            } else {
+                skipped_excluded_dir += 1;
+            }
             continue;
         }
 
@@ -199,10 +230,11 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<us
         match index_file(root, path, store, config) {
             Ok(true) => {
                 debug!("INDEXED: {} ", rel_path.display());
-                count += 1;
+                indexed += 1;
             }
             Ok(false) => {
                 debug!("UNCHANGED: {}", rel_path.display());
+                unchanged += 1;
             }
             Err(e) => {
                 debug!("INDEX_ERROR: {} ({})", rel_path.display(), e);
@@ -212,18 +244,27 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<us
     }
 
     info!(
-        "Indexed {} files (walked {} entries, {} files, skipped: {} hidden, {} excluded-dir, {} filtered, {} errors)",
-        count, total_entries, total_files, skipped_hidden, skipped_excluded_dir, skipped_filter, walk_errors
+        "Indexed {} files, {} unchanged (walked {} entries, {} files, skipped: {} hidden, {} excluded-dir, {} filtered, {} errors)",
+        indexed, unchanged, total_entries, total_files, skipped_hidden, skipped_excluded_dir, skipped_filter, walk_errors
     );
 
-    if count == 0 && total_files > 0 {
+    if indexed == 0 && unchanged == 0 && total_files > 0 {
         warn!(
             "0 files indexed out of {} files found! Check language config and exclude patterns.",
             total_files
         );
     }
 
-    Ok(count)
+    Ok(IndexSummary {
+        indexed,
+        unchanged,
+        total_entries,
+        total_files,
+        skipped_hidden,
+        skipped_excluded_dir,
+        skipped_filter,
+        walk_errors,
+    })
 }
 
 /// Index a single file. Returns true if the file was (re)indexed, false if skipped

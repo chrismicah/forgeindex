@@ -17,6 +17,20 @@ fn default_languages() -> Vec<String> {
     ]
 }
 
+fn legacy_default_languages_without_tsx() -> Vec<String> {
+    vec![
+        "python".into(),
+        "typescript".into(),
+        "javascript".into(),
+        "rust".into(),
+        "go".into(),
+        "java".into(),
+        "c".into(),
+        "cpp".into(),
+        "ruby".into(),
+    ]
+}
+
 fn default_exclude_patterns() -> Vec<String> {
     vec![
         "**/node_modules/**".into(),
@@ -212,8 +226,11 @@ impl Config {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)
                 .with_context(|| format!("Failed to read config: {}", config_path.display()))?;
-            let config: Config = toml::from_str(&content)
-                .with_context(|| "Failed to parse config.toml")?;
+            let mut config: Config =
+                toml::from_str(&content).with_context(|| "Failed to parse config.toml")?;
+            if config.index.languages == legacy_default_languages_without_tsx() {
+                config.index.languages.insert(2, "tsx".into());
+            }
             Ok(config)
         } else {
             Ok(Config::default())
