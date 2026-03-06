@@ -89,12 +89,14 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<us
             continue;
         }
 
-        // Skip hidden directories and files
-        if path
-            .components()
-            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-        {
-            continue;
+        // Skip hidden directories and files (relative to root only)
+        if let Ok(rel) = path.strip_prefix(root) {
+            if rel
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+            {
+                continue;
+            }
         }
 
         if !should_index(path, config, &excludes) {
