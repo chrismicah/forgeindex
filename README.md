@@ -14,12 +14,21 @@ ForgeIndex is a local-first MCP server that provides structural code indexing, t
 - **SQLite Store** — WAL-mode database with xxh3 content hashing for JIT invalidation
 - **Zero Config** — Works out of the box with sensible defaults
 
+## Install
+
+**One line:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/chrismicah/forgeindex/main/install.sh | sh
+```
+
+**From source:**
+```bash
+cargo install --git https://github.com/chrismicah/forgeindex.git
+```
+
 ## Quick Start
 
 ```bash
-# Build from source
-cargo build --release
-
 # Initialize in a project directory
 cd /path/to/your/project
 forgeindex init
@@ -145,6 +154,11 @@ cargo build --release
 ```
 
 The binary will be at `target/release/forgeindex`.
+
+## Documentation
+
+- [Design Document](DESIGN.md) — full architecture and specification
+- [MCP Tool Reference](docs/MCP_TOOLS.md) — complete tool docs for agent authors
 
 ## License
 
