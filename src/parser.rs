@@ -173,7 +173,11 @@ fn signature_up_to_body(node: Node, source: &[u8]) -> String {
         let sig = String::from_utf8_lossy(&source[start..end]);
         sig.trim_end().trim_end_matches('{').trim_end().to_string()
     } else {
-        node_text(node, source).lines().next().unwrap_or("").to_string()
+        node_text(node, source)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
     }
 }
 
@@ -338,7 +342,9 @@ fn extract_python_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
                     if let Some(left) = assign.child_by_field_name("left") {
                         if left.kind() == "identifier" {
                             let name = node_text(left, source);
-                            if name.chars().all(|c| c.is_ascii_uppercase() || c == '_') && !name.is_empty() {
+                            if name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                                && !name.is_empty()
+                            {
                                 let sig = node_text(node, source).trim().to_string();
                                 out.push(Symbol {
                                     name: name.to_string(),
@@ -404,7 +410,9 @@ fn extract_ts_node(node: Node, source: &[u8], out: &mut Vec<Symbol>, is_ts: bool
                                 });
                             }
                         }
-                        if child.kind() == "public_field_definition" || child.kind() == "field_definition" {
+                        if child.kind() == "public_field_definition"
+                            || child.kind() == "field_definition"
+                        {
                             if let Some(pn) = child.child_by_field_name("name") {
                                 let pname = node_text(pn, source).to_string();
                                 let psig = node_text(child, source).trim().to_string();
@@ -453,7 +461,11 @@ fn extract_ts_node(node: Node, source: &[u8], out: &mut Vec<Symbol>, is_ts: bool
         "type_alias_declaration" if is_ts => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source).to_string();
-                let sig = node_text(node, source).lines().next().unwrap_or("").to_string();
+                let sig = node_text(node, source)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 out.push(Symbol {
                     name,
                     kind: SymbolKind::Type,
@@ -485,7 +497,11 @@ fn extract_ts_node(node: Node, source: &[u8], out: &mut Vec<Symbol>, is_ts: bool
                 if child.kind() == "variable_declarator" {
                     if let Some(name_node) = child.child_by_field_name("name") {
                         let name = node_text(name_node, source).to_string();
-                        let sig = node_text(node, source).lines().next().unwrap_or("").to_string();
+                        let sig = node_text(node, source)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
                         // Check if const (parent starts with "const")
                         let full = node_text(node, source);
                         let kind = if full.trim_start().starts_with("const") {
@@ -653,7 +669,11 @@ fn extract_rust_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source).to_string();
                 let vis = rust_visibility(node, source);
-                let sig = node_text(node, source).lines().next().unwrap_or("").to_string();
+                let sig = node_text(node, source)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 out.push(Symbol {
                     name,
                     kind: SymbolKind::Const,
@@ -756,7 +776,11 @@ fn extract_go_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
                     if let Some(name_node) = child.child_by_field_name("name") {
                         let name = node_text(name_node, source).to_string();
                         let vis = go_visibility(&name);
-                        let sig = node_text(child, source).lines().next().unwrap_or("").to_string();
+                        let sig = node_text(child, source)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
                         let kind = if node_text(child, source).contains("interface") {
                             SymbolKind::Interface
                         } else {
@@ -806,7 +830,9 @@ fn extract_java_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
                 if let Some(body) = node.child_by_field_name("body") {
                     let mut cursor = body.walk();
                     for child in body.children(&mut cursor) {
-                        if child.kind() == "method_declaration" || child.kind() == "constructor_declaration" {
+                        if child.kind() == "method_declaration"
+                            || child.kind() == "constructor_declaration"
+                        {
                             if let Some(mn) = child.child_by_field_name("name") {
                                 let mname = node_text(mn, source).to_string();
                                 let mvis = java_visibility(child, source);
@@ -925,7 +951,11 @@ fn extract_c_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
         "struct_specifier" | "enum_specifier" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source).to_string();
-                let sig = node_text(node, source).lines().next().unwrap_or("").to_string();
+                let sig = node_text(node, source)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 out.push(Symbol {
                     name,
                     kind: SymbolKind::Type,
@@ -1092,7 +1122,11 @@ fn extract_ruby_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
         "singleton_method" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source).to_string();
-                let sig = node_text(node, source).lines().next().unwrap_or("").to_string();
+                let sig = node_text(node, source)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 out.push(Symbol {
                     name: format!("self.{}", name),
                     kind: SymbolKind::Method,
@@ -1108,7 +1142,11 @@ fn extract_ruby_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
         "class" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source).to_string();
-                let sig = node_text(node, source).lines().next().unwrap_or("").to_string();
+                let sig = node_text(node, source)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 let mut children = Vec::new();
                 if let Some(body) = node.child_by_field_name("body") {
                     let mut cursor = body.walk();
@@ -1116,7 +1154,11 @@ fn extract_ruby_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
                         if child.kind() == "method" {
                             if let Some(mn) = child.child_by_field_name("name") {
                                 let mname = node_text(mn, source).to_string();
-                                let msig = node_text(child, source).lines().next().unwrap_or("").to_string();
+                                let msig = node_text(child, source)
+                                    .lines()
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_string();
                                 children.push(Symbol {
                                     name: mname,
                                     kind: SymbolKind::Method,
@@ -1146,7 +1188,11 @@ fn extract_ruby_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
         "module" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source).to_string();
-                let sig = node_text(node, source).lines().next().unwrap_or("").to_string();
+                let sig = node_text(node, source)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 out.push(Symbol {
                     name,
                     kind: SymbolKind::Module,
@@ -1177,7 +1223,14 @@ fn extract_imports(root: Node, source: &[u8], lang: &str) -> Vec<Import> {
                     .strip_prefix("import ")
                     .unwrap_or("")
                     .split(',')
-                    .map(|s| s.trim().split(" as ").next().unwrap_or("").trim().to_string())
+                    .map(|s| {
+                        s.trim()
+                            .split(" as ")
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string()
+                    })
                     .filter(|s| !s.is_empty())
                     .collect();
                 let module = names.first().cloned();
@@ -1216,13 +1269,11 @@ fn extract_imports(root: Node, source: &[u8], lang: &str) -> Vec<Import> {
             // TypeScript / JavaScript
             ("typescript" | "tsx" | "javascript", "import_statement") => {
                 let text = node_text(child, source).to_string();
-                let source_mod = child
-                    .child_by_field_name("source")
-                    .map(|n| {
-                        node_text(n, source)
-                            .trim_matches(|c: char| c == '\'' || c == '"')
-                            .to_string()
-                    });
+                let source_mod = child.child_by_field_name("source").map(|n| {
+                    node_text(n, source)
+                        .trim_matches(|c: char| c == '\'' || c == '"')
+                        .to_string()
+                });
                 let mut names = Vec::new();
                 let mut ic = child.walk();
                 for c in child.children(&mut ic) {
@@ -1265,9 +1316,7 @@ fn extract_imports(root: Node, source: &[u8], lang: &str) -> Vec<Import> {
                 let mut ic = child.walk();
                 for c in child.children(&mut ic) {
                     if c.kind() == "import_spec" || c.kind() == "interpreted_string_literal" {
-                        let n = node_text(c, source)
-                            .trim_matches('"')
-                            .to_string();
+                        let n = node_text(c, source).trim_matches('"').to_string();
                         if !n.is_empty() {
                             names.push(n.clone());
                         }
@@ -1299,13 +1348,11 @@ fn extract_imports(root: Node, source: &[u8], lang: &str) -> Vec<Import> {
             // C / C++
             ("c" | "cpp", "preproc_include") => {
                 let text = node_text(child, source).to_string();
-                let path = child
-                    .child_by_field_name("path")
-                    .map(|n| {
-                        node_text(n, source)
-                            .trim_matches(|c: char| c == '"' || c == '<' || c == '>')
-                            .to_string()
-                    });
+                let path = child.child_by_field_name("path").map(|n| {
+                    node_text(n, source)
+                        .trim_matches(|c: char| c == '"' || c == '<' || c == '>')
+                        .to_string()
+                });
                 imports.push(Import {
                     raw_text: text,
                     source_module: path.clone(),
@@ -1321,7 +1368,9 @@ fn extract_imports(root: Node, source: &[u8], lang: &str) -> Vec<Import> {
                         .and_then(|a| a.child(0))
                         .map(|n| {
                             node_text(n, source)
-                                .trim_matches(|c: char| c == '\'' || c == '"' || c == '(' || c == ')')
+                                .trim_matches(|c: char| {
+                                    c == '\'' || c == '"' || c == '(' || c == ')'
+                                })
                                 .to_string()
                         });
                     imports.push(Import {

@@ -419,7 +419,7 @@ fn test_config_defaults() {
     assert!(config.index.languages.contains(&"typescript".to_string()));
     assert!(config.index.languages.contains(&"tsx".to_string()));
     assert!(config.index.languages.contains(&"rust".to_string()));
-    assert_eq!(config.compression.default_token_budget, 4000);
+    assert_eq!(config.compression.default_token_budget, 32000);
     assert!(config.watcher.enabled);
     assert!(config.git_hooks.auto_install);
 }

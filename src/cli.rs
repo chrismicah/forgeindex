@@ -49,7 +49,7 @@ pub enum Command {
     /// Show codebase map overview
     Map {
         /// Maximum characters in output
-        #[arg(short = 'c', long, default_value = "8000")]
+        #[arg(short = 'c', long, default_value = "120000")]
         max_chars: usize,
     },
 

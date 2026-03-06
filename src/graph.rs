@@ -171,8 +171,10 @@ impl DepGraph {
         }
         let nf = n as f64;
 
-        let mut scores: HashMap<String, f64> =
-            all_nodes.iter().map(|name| (name.clone(), 1.0 / nf)).collect();
+        let mut scores: HashMap<String, f64> = all_nodes
+            .iter()
+            .map(|name| (name.clone(), 1.0 / nf))
+            .collect();
 
         for _ in 0..iterations {
             let mut new_scores: HashMap<String, f64> = HashMap::new();
@@ -205,27 +207,12 @@ impl DepGraph {
     /// Get direct dependencies or dependents of a symbol.
     pub fn get_dependencies(&self, symbol: &str, direction: Direction) -> Vec<String> {
         match direction {
-            Direction::Out => self
-                .outgoing
-                .get(symbol)
-                .cloned()
-                .unwrap_or_default(),
-            Direction::In => self
-                .incoming
-                .get(symbol)
-                .cloned()
-                .unwrap_or_default(),
+            Direction::Out => self.outgoing.get(symbol).cloned().unwrap_or_default(),
+            Direction::In => self.incoming.get(symbol).cloned().unwrap_or_default(),
             Direction::Both => {
-                let mut result: Vec<String> = self
-                    .outgoing
-                    .get(symbol)
-                    .cloned()
-                    .unwrap_or_default();
-                let incoming = self
-                    .incoming
-                    .get(symbol)
-                    .cloned()
-                    .unwrap_or_default();
+                let mut result: Vec<String> =
+                    self.outgoing.get(symbol).cloned().unwrap_or_default();
+                let incoming = self.incoming.get(symbol).cloned().unwrap_or_default();
                 result.extend(incoming);
                 result.sort();
                 result.dedup();
