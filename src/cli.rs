@@ -7,16 +7,16 @@ use clap::{Parser, Subcommand};
     about = "AST-driven codebase intelligence for agentic workflows"
 )]
 pub struct Cli {
-    #[command(subcommand)]
-    pub command: Command,
-
     /// Project root directory (default: current directory)
     #[arg(short, long, global = true)]
     pub root: Option<String>,
 
     /// Enable verbose output (show skipped files and diagnostics)
-    #[arg(short, long, global = true)]
+    #[arg(long, global = true)]
     pub verbose: bool,
+
+    #[command(subcommand)]
+    pub command: Command,
 }
 
 #[derive(Subcommand)]
