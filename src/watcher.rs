@@ -67,12 +67,43 @@ where
     Ok(())
 }
 
-/// Install git hooks for auto-reindexing.
-pub fn install_hooks(repo_path: &Path, hook_types: &[String]) -> Result<()> {
-    let git_dir = repo_path.join(".git");
-    if !git_dir.exists() {
+/// Resolve the actual .git directory, following gitdir references in worktrees/submodules.
+fn resolve_git_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
+    let git_path = repo_path.join(".git");
+    if !git_path.exists() {
         anyhow::bail!("Not a git repository: {}", repo_path.display());
     }
+
+    if git_path.is_dir() {
+        return Ok(git_path);
+    }
+
+    // .git is a file (worktree or submodule) — read the gitdir pointer
+    let content = std::fs::read_to_string(&git_path)
+        .context("Failed to read .git file")?;
+    let gitdir = content
+        .strip_prefix("gitdir: ")
+        .unwrap_or(&content)
+        .trim();
+    let resolved = if Path::new(gitdir).is_absolute() {
+        std::path::PathBuf::from(gitdir)
+    } else {
+        repo_path.join(gitdir)
+    };
+
+    if resolved.is_dir() {
+        Ok(resolved)
+    } else {
+        anyhow::bail!(
+            "gitdir reference points to non-existent directory: {}",
+            resolved.display()
+        )
+    }
+}
+
+/// Install git hooks for auto-reindexing.
+pub fn install_hooks(repo_path: &Path, hook_types: &[String]) -> Result<()> {
+    let git_dir = resolve_git_dir(repo_path)?;
 
     let hooks_dir = git_dir.join("hooks");
     std::fs::create_dir_all(&hooks_dir)?;
@@ -120,7 +151,11 @@ fi
 
 /// Remove ForgeIndex git hooks.
 pub fn uninstall_hooks(repo_path: &Path, hook_types: &[String]) -> Result<()> {
-    let hooks_dir = repo_path.join(".git").join("hooks");
+    let git_dir = match resolve_git_dir(repo_path) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+    let hooks_dir = git_dir.join("hooks");
     if !hooks_dir.exists() {
         return Ok(());
     }
