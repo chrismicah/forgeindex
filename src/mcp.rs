@@ -206,13 +206,24 @@ impl McpServer {
                     .as_str()
                     .ok_or_else(|| anyhow!("missing 'symbol' parameter"))?;
                 let direction = args["direction"].as_str().unwrap_or("both");
-                self.tool_get_dependencies(&store, symbol, direction)
+                let max_results = args["max_results"].as_u64().unwrap_or(20) as usize;
+                self.tool_get_dependencies(&store, symbol, direction, max_results)
             }
             "get_impact" => {
                 let symbol = args["symbol"]
                     .as_str()
                     .ok_or_else(|| anyhow!("missing 'symbol' parameter"))?;
-                self.tool_get_impact(&store, symbol)
+                let max_depth = args["max_depth"].as_u64().unwrap_or(3) as usize;
+                let max_results = args["max_results"].as_u64().unwrap_or(30) as usize;
+                self.tool_get_impact(&store, symbol, max_depth, max_results)
+            }
+            "trace_data_flow" => {
+                let symbol = args["symbol"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("missing 'symbol' parameter"))?;
+                let max_depth = args["max_depth"].as_u64().unwrap_or(3) as usize;
+                let max_results = args["max_results"].as_u64().unwrap_or(20) as usize;
+                self.tool_trace_data_flow(&store, symbol, max_depth, max_results)
             }
             "get_ranked_symbols" => {
                 let top_n = args["top_n"].as_u64().unwrap_or(10) as usize;
@@ -543,6 +554,7 @@ impl McpServer {
         store: &Store,
         symbol: &str,
         direction: &str,
+        max_results: usize,
     ) -> Result<String> {
         let all_symbols = store.get_all_symbols()?;
         let all_imports = store.get_all_imports()?;
@@ -558,33 +570,160 @@ impl McpServer {
             ));
         }
 
-        let mut output = format!("Dependencies ({}) for {}:\n", direction, symbol);
-        for dep in &deps {
-            let score = graph.score(dep);
+        // Sort by PageRank score descending, filter out zero-rank noise
+        let mut scored: Vec<_> = deps.iter().map(|d| (d, graph.score(d))).collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let total = scored.len();
+        let shown: Vec<_> = scored.into_iter().take(max_results).collect();
+
+        let mut output = format!(
+            "Dependencies ({}) for {} ({} total, showing top {}):\n",
+            direction,
+            symbol,
+            total,
+            shown.len()
+        );
+        for (dep, score) in &shown {
             output.push_str(&format!("  → {} (rank: {:.4})\n", dep, score));
+        }
+        if total > max_results {
+            output.push_str(&format!("  ... and {} more\n", total - max_results));
         }
 
         Ok(output)
     }
 
-    fn tool_get_impact(&self, store: &Store, symbol: &str) -> Result<String> {
+    fn tool_get_impact(
+        &self,
+        store: &Store,
+        symbol: &str,
+        max_depth: usize,
+        max_results: usize,
+    ) -> Result<String> {
         let all_symbols = store.get_all_symbols()?;
         let all_imports = store.get_all_imports()?;
         let graph = DepGraph::build(&all_symbols, &all_imports);
 
-        let impact = graph.get_impact(symbol);
+        let impact = graph.get_impact_bounded(symbol, max_depth);
 
         if impact.is_empty() {
             return Ok(format!("No transitive dependents found for: {}", symbol));
         }
 
-        let mut output = format!(
-            "Blast radius for {} ({} affected symbols):\n",
-            symbol,
-            impact.len()
-        );
+        // Group by file path for a compact summary
+        let mut by_file: std::collections::BTreeMap<String, Vec<&str>> =
+            std::collections::BTreeMap::new();
         for dep in &impact {
-            output.push_str(&format!("  ⚡ {}\n", dep));
+            // Look up file path from symbol metadata
+            let file = graph.file_of(dep).unwrap_or("unknown");
+            by_file.entry(file.to_string()).or_default().push(dep);
+        }
+
+        let total_symbols = impact.len();
+        let total_files = by_file.len();
+
+        let mut output = format!(
+            "Blast radius for {} (depth ≤ {}):\n  {} affected symbols across {} files\n\n",
+            symbol, max_depth, total_symbols, total_files
+        );
+
+        let mut shown = 0;
+        for (file, syms) in &by_file {
+            if shown >= max_results {
+                break;
+            }
+            output.push_str(&format!("{}:\n", file));
+            for s in syms {
+                if shown >= max_results {
+                    break;
+                }
+                output.push_str(&format!("  ⚡ {}\n", s));
+                shown += 1;
+            }
+        }
+        if total_symbols > max_results {
+            output.push_str(&format!(
+                "\n... and {} more symbols in {} files\n",
+                total_symbols - shown,
+                total_files - by_file.keys().take(shown).count()
+            ));
+        }
+
+        Ok(output)
+    }
+
+    fn tool_trace_data_flow(
+        &self,
+        store: &Store,
+        symbol: &str,
+        max_depth: usize,
+        max_results: usize,
+    ) -> Result<String> {
+        let all_symbols = store.get_all_symbols()?;
+        let all_imports = store.get_all_imports()?;
+        let graph = DepGraph::build(&all_symbols, &all_imports);
+
+        let sym_file = graph.file_of(symbol).unwrap_or("unknown");
+        let sym_kind = graph.kind_of(symbol).unwrap_or("symbol");
+
+        let (upstream, downstream) = graph.trace_flow(symbol, max_depth);
+
+        let mut output = format!(
+            "Data flow trace for {} [{}] in {}:\n\n",
+            symbol, sym_kind, sym_file
+        );
+
+        // Upstream: who calls this
+        output.push_str(&format!(
+            "⬆ UPSTREAM (callers, {} total):\n",
+            upstream.len()
+        ));
+        if upstream.is_empty() {
+            output.push_str("  (none — this is a root/entry point)\n");
+        } else {
+            for (shown, (name, depth)) in upstream.iter().enumerate() {
+                if shown >= max_results {
+                    break;
+                }
+                let file = graph.file_of(name).unwrap_or("?");
+                let kind = graph.kind_of(name).unwrap_or("?");
+                let indent = "  ".repeat(*depth);
+                output.push_str(&format!("{}← {} [{}] — {}\n", indent, name, kind, file));
+            }
+            if upstream.len() > max_results {
+                output.push_str(&format!(
+                    "  ... and {} more\n",
+                    upstream.len() - max_results
+                ));
+            }
+        }
+
+        output.push('\n');
+
+        // Downstream: what this calls
+        output.push_str(&format!(
+            "⬇ DOWNSTREAM (callees, {} total):\n",
+            downstream.len()
+        ));
+        if downstream.is_empty() {
+            output.push_str("  (none — this is a leaf/terminal)\n");
+        } else {
+            for (shown, (name, depth)) in downstream.iter().enumerate() {
+                if shown >= max_results {
+                    break;
+                }
+                let file = graph.file_of(name).unwrap_or("?");
+                let kind = graph.kind_of(name).unwrap_or("?");
+                let indent = "  ".repeat(*depth);
+                output.push_str(&format!("{}→ {} [{}] — {}\n", indent, name, kind, file));
+            }
+            if downstream.len() > max_results {
+                output.push_str(&format!(
+                    "  ... and {} more\n",
+                    downstream.len() - max_results
+                ));
+            }
         }
 
         Ok(output)
@@ -779,23 +918,39 @@ impl McpServer {
             }),
             json!({
                 "name": "get_dependencies",
-                "description": "Get direct dependencies or dependents of a symbol.",
+                "description": "Get direct dependencies or dependents of a symbol, sorted by PageRank importance.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "symbol": { "type": "string", "description": "Symbol name" },
-                        "direction": { "type": "string", "enum": ["in","out","both"], "default": "both", "description": "Direction of dependencies" }
+                        "direction": { "type": "string", "enum": ["in","out","both"], "default": "both", "description": "Direction of dependencies" },
+                        "max_results": { "type": "integer", "default": 20, "description": "Maximum results to return" }
                     },
                     "required": ["symbol"]
                 }
             }),
             json!({
                 "name": "get_impact",
-                "description": "Compute the blast radius of changing a symbol. Returns all transitive dependents.",
+                "description": "Compute the blast radius of changing a symbol. Groups affected symbols by file with a summary count.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "symbol": { "type": "string", "description": "Symbol name to analyze" }
+                        "symbol": { "type": "string", "description": "Symbol name to analyze" },
+                        "max_depth": { "type": "integer", "default": 3, "description": "Maximum traversal depth (hops). Use 1 for direct dependents only" },
+                        "max_results": { "type": "integer", "default": 30, "description": "Maximum symbols to list (summary count always shown)" }
+                    },
+                    "required": ["symbol"]
+                }
+            }),
+            json!({
+                "name": "trace_data_flow",
+                "description": "Trace a symbol's data flow: upstream callers and downstream callees across files. Shows the call chain for understanding request paths and data pipelines.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": { "type": "string", "description": "Symbol name to trace" },
+                        "max_depth": { "type": "integer", "default": 3, "description": "Maximum traversal depth (hops)" },
+                        "max_results": { "type": "integer", "default": 20, "description": "Maximum symbols per direction" }
                     },
                     "required": ["symbol"]
                 }

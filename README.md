@@ -9,7 +9,7 @@ ForgeIndex is a local-first MCP server that provides structural code indexing, t
 - **AST Parsing** — Tree-sitter-based parsing for Python, TypeScript, JavaScript, Rust, Go, Java, C/C++, Ruby
 - **Token Compression** — Skeleton views, TF-IDF ranking, and greedy knapsack packing reduce token payloads by 85–95%
 - **Dependency Graph** — Import-based graph with PageRank scoring and blast radius analysis
-- **MCP Server** — 13 tools exposed via JSON-RPC over stdio, compatible with Claude Desktop, Conductor, and any MCP client
+- **MCP Server** — 14 tools exposed via JSON-RPC over stdio, compatible with Claude Desktop, Conductor, and any MCP client
 - **Auto-Reindexing** — File watcher + git hooks keep the index fresh
 - **SQLite Store** — WAL-mode database with xxh3 content hashing for JIT invalidation
 - **Zero Config** — Works out of the box with sensible defaults
@@ -57,7 +57,8 @@ forgeindex serve
 | `search_imports` | Search import/require/use statements across all files |
 | `get_skeleton` | Skeletonized file view — signatures only |
 | `get_dependencies` | Direct dependencies or dependents |
-| `get_impact` | Transitive blast radius analysis |
+| `get_impact` | Transitive blast radius analysis with `max_depth` and `max_results` limits |
+| `trace_data_flow` | Follow a symbol upstream (callers) and downstream (callees) across files |
 | `get_ranked_symbols` | Top symbols by PageRank importance. Optional `path` filter to scope to a directory |
 | `compress_context` | Optimal context within token budget (default 32K tokens) |
 | `pack_repo` | Full repo packed into single artifact |
