@@ -526,7 +526,7 @@ impl McpServer {
         let all_imports = store.get_all_imports()?;
         let graph = DepGraph::build(&all_symbols, &all_imports);
 
-        let dir = Direction::from_str(direction);
+        let dir = Direction::parse(direction);
         let deps = graph.get_dependencies(symbol, dir);
 
         if deps.is_empty() {

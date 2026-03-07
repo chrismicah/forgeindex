@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
 use forgeindex::cli::{Cli, Command, ConfigAction, HooksAction};
@@ -47,7 +47,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn cmd_init(root: &PathBuf, config: &Config) -> Result<()> {
+fn cmd_init(root: &Path, config: &Config) -> Result<()> {
     // Create .forgeindex directory
     let forge_dir = root.join(".forgeindex");
     std::fs::create_dir_all(&forge_dir)?;
@@ -74,7 +74,7 @@ fn cmd_init(root: &PathBuf, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_serve(root: &PathBuf, config: &Config) -> Result<()> {
+fn cmd_serve(root: &Path, config: &Config) -> Result<()> {
     // Ensure index exists
     let db_path = Config::db_path(root);
     if !db_path.exists() {
@@ -82,11 +82,11 @@ fn cmd_serve(root: &PathBuf, config: &Config) -> Result<()> {
         std::process::exit(1);
     }
 
-    let server = McpServer::new(root.clone(), config.clone());
+    let server = McpServer::new(root.to_path_buf(), config.clone());
     server.run()
 }
 
-fn cmd_status(root: &PathBuf) -> Result<()> {
+fn cmd_status(root: &Path) -> Result<()> {
     let db_path = Config::db_path(root);
     if !db_path.exists() {
         println!("No index found. Run `forgeindex init` first.");
@@ -108,7 +108,7 @@ fn cmd_status(root: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_reindex(root: &PathBuf, config: &Config, path: Option<&str>) -> Result<()> {
+fn cmd_reindex(root: &Path, config: &Config, path: Option<&str>) -> Result<()> {
     let db_path = Config::db_path(root);
     let store = Store::open(&db_path)?;
 
@@ -129,7 +129,7 @@ fn cmd_reindex(root: &PathBuf, config: &Config, path: Option<&str>) -> Result<()
     Ok(())
 }
 
-fn cmd_query(root: &PathBuf, query: &str, max_results: usize) -> Result<()> {
+fn cmd_query(root: &Path, query: &str, max_results: usize) -> Result<()> {
     let db_path = Config::db_path(root);
     if !db_path.exists() {
         println!("No index found. Run `forgeindex init` first.");
@@ -159,7 +159,7 @@ fn cmd_query(root: &PathBuf, query: &str, max_results: usize) -> Result<()> {
     Ok(())
 }
 
-fn cmd_map(root: &PathBuf, max_chars: usize) -> Result<()> {
+fn cmd_map(root: &Path, max_chars: usize) -> Result<()> {
     let db_path = Config::db_path(root);
     if !db_path.exists() {
         println!("No index found. Run `forgeindex init` first.");
@@ -230,7 +230,7 @@ fn cmd_map(root: &PathBuf, max_chars: usize) -> Result<()> {
     Ok(())
 }
 
-fn cmd_hooks(root: &PathBuf, config: &Config, action: HooksAction) -> Result<()> {
+fn cmd_hooks(root: &Path, config: &Config, action: HooksAction) -> Result<()> {
     match action {
         HooksAction::Install => {
             watcher::install_hooks(root, &config.git_hooks.hook_types)?;
@@ -244,7 +244,7 @@ fn cmd_hooks(root: &PathBuf, config: &Config, action: HooksAction) -> Result<()>
     Ok(())
 }
 
-fn cmd_config(root: &PathBuf, config: &Config, action: ConfigAction) -> Result<()> {
+fn cmd_config(root: &Path, config: &Config, action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::Show => {
             let toml_str = toml::to_string_pretty(config)?;

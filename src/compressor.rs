@@ -4,7 +4,7 @@ use crate::store::SymbolRecord;
 
 /// Estimate token count: ~4 characters per token on average for code.
 pub fn estimate_tokens(text: &str) -> usize {
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// Generate a skeleton view of a file: signatures only, bodies collapsed.

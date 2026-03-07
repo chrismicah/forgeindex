@@ -10,7 +10,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "in" => Direction::In,
             "out" => Direction::Out,
@@ -38,6 +38,12 @@ pub struct DepGraph {
     symbol_meta: HashMap<String, (String, String)>, // name -> (kind, file_path)
 }
 
+impl Default for DepGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DepGraph {
     pub fn new() -> Self {
         Self {
@@ -59,14 +65,8 @@ impl DepGraph {
             graph
                 .symbol_meta
                 .insert(sym.name.clone(), (sym.kind.clone(), sym.file_path.clone()));
-            graph
-                .outgoing
-                .entry(sym.name.clone())
-                .or_insert_with(Vec::new);
-            graph
-                .incoming
-                .entry(sym.name.clone())
-                .or_insert_with(Vec::new);
+            graph.outgoing.entry(sym.name.clone()).or_default();
+            graph.incoming.entry(sym.name.clone()).or_default();
         }
 
         // Build edges from imports: if file A imports name X, and X is a known

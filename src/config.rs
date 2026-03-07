@@ -85,7 +85,7 @@ fn default_hook_types() -> Vec<String> {
     vec!["post-commit".into(), "post-checkout".into()]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub index: IndexConfig,
@@ -97,18 +97,6 @@ pub struct Config {
     pub git_hooks: GitHooksConfig,
     #[serde(default)]
     pub server: ServerConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            index: IndexConfig::default(),
-            compression: CompressionConfig::default(),
-            watcher: WatcherConfig::default(),
-            git_hooks: GitHooksConfig::default(),
-            server: ServerConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
