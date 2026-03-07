@@ -2,6 +2,22 @@ use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::path::Path;
 use tracing::{debug, info, warn};
+
+/// Check if verbose logging is enabled via env vars.
+fn is_verbose() -> bool {
+    std::env::var("FORGEINDEX_DEBUG").is_ok()
+        || std::env::var("RUST_LOG")
+            .map(|v| v.contains("debug") || v.contains("trace"))
+            .unwrap_or(false)
+}
+
+macro_rules! verbose {
+    ($($arg:tt)*) => {
+        if is_verbose() {
+            eprintln!($($arg)*);
+        }
+    };
+}
 use walkdir::WalkDir;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -154,8 +170,8 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<In
 
     let walker = WalkDir::new(root).follow_links(false).into_iter();
 
-    debug!("Walking directory: {}", root.display());
-    debug!("Config languages: {:?}", config.index.languages);
+    verbose!("Walking directory: {}", root.display());
+    verbose!("Config languages: {:?}", config.index.languages);
 
     for entry_result in walker {
         total_entries += 1;
@@ -164,9 +180,9 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<In
             Ok(e) => e,
             Err(e) => {
                 if let Some(path) = e.path() {
-                    debug!("WALK_ERROR at {}: {}", path.display(), e);
+                    verbose!("WALK_ERROR at {}: {}", path.display(), e);
                 } else {
-                    debug!("WALK_ERROR: {}", e);
+                    verbose!("WALK_ERROR: {}", e);
                 }
                 walk_errors += 1;
                 continue;
@@ -186,7 +202,7 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<In
         let rel_path = match path.strip_prefix(root) {
             Ok(r) => r,
             Err(_) => {
-                debug!(
+                verbose!(
                     "SKIP_NO_REL: {} (could not strip prefix {})",
                     path.display(),
                     root.display()
@@ -211,7 +227,7 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<In
             }
         }
         if let Some(reason) = excluded_by {
-            debug!("SKIP_DIR: {} ({})", rel_path.display(), reason);
+            verbose!("SKIP_DIR: {} ({})", rel_path.display(), reason);
             if hidden_component {
                 skipped_hidden += 1;
             } else {
@@ -222,38 +238,42 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<In
 
         // Check if file should be indexed
         if let Some(reason) = skip_reason(rel_path, path, config, &excludes) {
-            debug!("SKIP_FILTER: {} ({})", rel_path.display(), reason);
+            verbose!("SKIP_FILTER: {} ({})", rel_path.display(), reason);
             skipped_filter += 1;
             continue;
         }
 
         match index_file(root, path, store, config) {
             Ok(true) => {
-                debug!("INDEXED: {} ", rel_path.display());
+                verbose!("INDEXED: {} ", rel_path.display());
                 indexed += 1;
             }
             Ok(false) => {
-                debug!("UNCHANGED: {}", rel_path.display());
+                verbose!("UNCHANGED: {}", rel_path.display());
                 unchanged += 1;
             }
             Err(e) => {
-                debug!("INDEX_ERROR: {} ({})", rel_path.display(), e);
+                verbose!("INDEX_ERROR: {} ({})", rel_path.display(), e);
                 walk_errors += 1;
             }
         }
     }
 
-    info!(
-        "Indexed {} files, {} unchanged (walked {} entries, {} files, skipped: {} hidden, {} excluded-dir, {} filtered, {} errors)",
-        indexed, unchanged, total_entries, total_files, skipped_hidden, skipped_excluded_dir, skipped_filter, walk_errors
-    );
+    if is_verbose() || (indexed == 0 && unchanged == 0) {
+        eprintln!(
+            "[forgeindex] walked {} entries, {} files | indexed {} | unchanged {} | skipped: {} hidden, {} excluded-dir, {} filtered, {} errors",
+            total_entries, total_files, indexed, unchanged, skipped_hidden, skipped_excluded_dir, skipped_filter, walk_errors
+        );
+    }
 
     if indexed == 0 && unchanged == 0 && total_files > 0 {
-        warn!(
-            "0 files indexed out of {} files found! Check language config and exclude patterns.",
+        eprintln!(
+            "[forgeindex] WARNING: 0 files indexed out of {} found! Check language config and exclude patterns.",
             total_files
         );
     }
+
+    info!("Indexed {} files", indexed);
 
     Ok(IndexSummary {
         indexed,
@@ -283,7 +303,7 @@ pub fn index_file(root: &Path, path: &Path, store: &Store, _config: &Config) -> 
     // JIT hash check: skip if unchanged
     if let Ok(Some(stored_hash)) = store.get_file_hash(&rel_path) {
         if stored_hash == hash.to_string() {
-            debug!("Unchanged: {}", rel_path);
+            verbose!("Unchanged: {}", rel_path);
             return Ok(false);
         }
     }
@@ -297,7 +317,7 @@ pub fn index_file(root: &Path, path: &Path, store: &Store, _config: &Config) -> 
     };
 
     store.upsert_parsed_file(&parsed)?;
-    debug!("Indexed: {} ({} symbols)", rel_path, parsed.symbols.len());
+    verbose!("Indexed: {} ({} symbols)", rel_path, parsed.symbols.len());
 
     Ok(true)
 }
