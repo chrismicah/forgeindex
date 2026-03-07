@@ -217,7 +217,10 @@ impl Store {
         let mut rank_parts = Vec::new();
         let exact_idx = param_values.len() + 1;
         param_values.push(query.to_string());
-        rank_parts.push(format!("CASE WHEN s.name = ?{} THEN 0 ELSE 10 END", exact_idx));
+        rank_parts.push(format!(
+            "CASE WHEN s.name = ?{} THEN 0 ELSE 10 END",
+            exact_idx
+        ));
 
         // Boost symbols that match more words (subtract 3 for each matching word)
         for (i, _word) in words.iter().enumerate() {

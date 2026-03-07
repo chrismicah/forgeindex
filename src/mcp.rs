@@ -622,7 +622,11 @@ impl McpServer {
             by_file.entry(&imp.file_path).or_default().push(imp);
         }
 
-        let mut output = format!("{} imports across {} files:\n\n", results.len(), by_file.len());
+        let mut output = format!(
+            "{} imports across {} files:\n\n",
+            results.len(),
+            by_file.len()
+        );
         for (file, imps) in &by_file {
             output.push_str(&format!("{}:\n", file));
             for imp in imps {
