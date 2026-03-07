@@ -433,11 +433,27 @@ impl Store {
         let mut param_values: Vec<String> = Vec::new();
 
         for word in &words {
-            let p = param_values.len() + 1;
-            where_parts.push(format!(
-                "(i.raw_text LIKE ?{p} OR COALESCE(i.source_module,'') LIKE ?{p})"
-            ));
-            param_values.push(format!("%{}%", word));
+            if word.len() <= 2 {
+                // Short terms: match as exact module name or path component,
+                // not substring. Prevents "ai" matching "tailwind-merge", "email", etc.
+                let p1 = param_values.len() + 1;
+                let p2 = p1 + 1;
+                let p3 = p2 + 1;
+                where_parts.push(format!(
+                    "(COALESCE(i.source_module,'') = ?{p1} \
+                     OR COALESCE(i.source_module,'') LIKE ?{p2} \
+                     OR COALESCE(i.source_module,'') LIKE ?{p3})"
+                ));
+                param_values.push(word.to_string()); // exact: 'ai'
+                param_values.push(format!("{}/%", word)); // prefix: 'ai/...'
+                param_values.push(format!("%/{}", word)); // suffix: '.../ai'
+            } else {
+                let p = param_values.len() + 1;
+                where_parts.push(format!(
+                    "(i.raw_text LIKE ?{p} OR COALESCE(i.source_module,'') LIKE ?{p})"
+                ));
+                param_values.push(format!("%{}%", word));
+            }
         }
 
         let limit_idx = param_values.len() + 1;
