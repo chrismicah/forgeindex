@@ -247,6 +247,39 @@ impl DepGraph {
         result
     }
 
+    /// Compute blast radius with a depth limit.
+    pub fn get_impact_bounded(&self, symbol: &str, max_depth: usize) -> Vec<String> {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((symbol.to_string(), 0usize));
+
+        while let Some((current, d)) = queue.pop_front() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            if d >= max_depth {
+                continue;
+            }
+            if let Some(dependents) = self.incoming.get(&current) {
+                for dep in dependents {
+                    if !visited.contains(dep) {
+                        queue.push_back((dep.clone(), d + 1));
+                    }
+                }
+            }
+        }
+
+        visited.remove(symbol);
+        let mut result: Vec<String> = visited.into_iter().collect();
+        result.sort();
+        result
+    }
+
+    /// Look up the file path for a symbol.
+    pub fn file_of(&self, symbol: &str) -> Option<&str> {
+        self.symbol_meta.get(symbol).map(|(_, path)| path.as_str())
+    }
+
     /// Get symbols related within N hops.
     pub fn related(&self, symbol: &str, depth: usize) -> Vec<String> {
         let mut visited = HashSet::new();
