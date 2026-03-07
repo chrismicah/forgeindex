@@ -2,6 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::store::{ImportRecord, SymbolRecord};
 
+/// A traced symbol with its depth from the origin.
+pub type TraceEntry = (String, usize);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     In,
@@ -278,6 +281,85 @@ impl DepGraph {
     /// Look up the file path for a symbol.
     pub fn file_of(&self, symbol: &str) -> Option<&str> {
         self.symbol_meta.get(symbol).map(|(_, path)| path.as_str())
+    }
+
+    /// Trace data flow: follow a symbol upstream (callers) and downstream (callees)
+    /// returning the chain with depth info, sorted by direction then rank.
+    pub fn trace_flow(&self, symbol: &str, max_depth: usize) -> (Vec<TraceEntry>, Vec<TraceEntry>) {
+        // Upstream: who calls/uses this symbol (incoming edges)
+        let mut upstream = Vec::new();
+        {
+            let mut visited = HashSet::new();
+            let mut queue = VecDeque::new();
+            queue.push_back((symbol.to_string(), 0usize));
+            visited.insert(symbol.to_string());
+
+            while let Some((current, d)) = queue.pop_front() {
+                if d > 0 {
+                    upstream.push((current.clone(), d));
+                }
+                if d >= max_depth {
+                    continue;
+                }
+                if let Some(callers) = self.incoming.get(&current) {
+                    for caller in callers {
+                        if !visited.contains(caller) {
+                            visited.insert(caller.clone());
+                            queue.push_back((caller.clone(), d + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Downstream: what does this symbol call/use (outgoing edges)
+        let mut downstream = Vec::new();
+        {
+            let mut visited = HashSet::new();
+            let mut queue = VecDeque::new();
+            queue.push_back((symbol.to_string(), 0usize));
+            visited.insert(symbol.to_string());
+
+            while let Some((current, d)) = queue.pop_front() {
+                if d > 0 {
+                    downstream.push((current.clone(), d));
+                }
+                if d >= max_depth {
+                    continue;
+                }
+                if let Some(callees) = self.outgoing.get(&current) {
+                    for callee in callees {
+                        if !visited.contains(callee) {
+                            visited.insert(callee.clone());
+                            queue.push_back((callee.clone(), d + 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort each by depth then by rank
+        upstream.sort_by(|a, b| {
+            a.1.cmp(&b.1).then_with(|| {
+                let sa = self.score(&a.0);
+                let sb = self.score(&b.0);
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+        downstream.sort_by(|a, b| {
+            a.1.cmp(&b.1).then_with(|| {
+                let sa = self.score(&a.0);
+                let sb = self.score(&b.0);
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+
+        (upstream, downstream)
+    }
+
+    /// Look up the kind for a symbol.
+    pub fn kind_of(&self, symbol: &str) -> Option<&str> {
+        self.symbol_meta.get(symbol).map(|(kind, _)| kind.as_str())
     }
 
     /// Get symbols related within N hops.

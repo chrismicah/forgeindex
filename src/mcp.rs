@@ -217,6 +217,14 @@ impl McpServer {
                 let max_results = args["max_results"].as_u64().unwrap_or(30) as usize;
                 self.tool_get_impact(&store, symbol, max_depth, max_results)
             }
+            "trace_data_flow" => {
+                let symbol = args["symbol"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("missing 'symbol' parameter"))?;
+                let max_depth = args["max_depth"].as_u64().unwrap_or(3) as usize;
+                let max_results = args["max_results"].as_u64().unwrap_or(20) as usize;
+                self.tool_trace_data_flow(&store, symbol, max_depth, max_results)
+            }
             "get_ranked_symbols" => {
                 let top_n = args["top_n"].as_u64().unwrap_or(10) as usize;
                 let kind = args["kind"].as_str();
@@ -645,6 +653,82 @@ impl McpServer {
         Ok(output)
     }
 
+    fn tool_trace_data_flow(
+        &self,
+        store: &Store,
+        symbol: &str,
+        max_depth: usize,
+        max_results: usize,
+    ) -> Result<String> {
+        let all_symbols = store.get_all_symbols()?;
+        let all_imports = store.get_all_imports()?;
+        let graph = DepGraph::build(&all_symbols, &all_imports);
+
+        let sym_file = graph.file_of(symbol).unwrap_or("unknown");
+        let sym_kind = graph.kind_of(symbol).unwrap_or("symbol");
+
+        let (upstream, downstream) = graph.trace_flow(symbol, max_depth);
+
+        let mut output = format!(
+            "Data flow trace for {} [{}] in {}:\n\n",
+            symbol, sym_kind, sym_file
+        );
+
+        // Upstream: who calls this
+        output.push_str(&format!(
+            "⬆ UPSTREAM (callers, {} total):\n",
+            upstream.len()
+        ));
+        if upstream.is_empty() {
+            output.push_str("  (none — this is a root/entry point)\n");
+        } else {
+            for (shown, (name, depth)) in upstream.iter().enumerate() {
+                if shown >= max_results {
+                    break;
+                }
+                let file = graph.file_of(name).unwrap_or("?");
+                let kind = graph.kind_of(name).unwrap_or("?");
+                let indent = "  ".repeat(*depth);
+                output.push_str(&format!("{}← {} [{}] — {}\n", indent, name, kind, file));
+            }
+            if upstream.len() > max_results {
+                output.push_str(&format!(
+                    "  ... and {} more\n",
+                    upstream.len() - max_results
+                ));
+            }
+        }
+
+        output.push('\n');
+
+        // Downstream: what this calls
+        output.push_str(&format!(
+            "⬇ DOWNSTREAM (callees, {} total):\n",
+            downstream.len()
+        ));
+        if downstream.is_empty() {
+            output.push_str("  (none — this is a leaf/terminal)\n");
+        } else {
+            for (shown, (name, depth)) in downstream.iter().enumerate() {
+                if shown >= max_results {
+                    break;
+                }
+                let file = graph.file_of(name).unwrap_or("?");
+                let kind = graph.kind_of(name).unwrap_or("?");
+                let indent = "  ".repeat(*depth);
+                output.push_str(&format!("{}→ {} [{}] — {}\n", indent, name, kind, file));
+            }
+            if downstream.len() > max_results {
+                output.push_str(&format!(
+                    "  ... and {} more\n",
+                    downstream.len() - max_results
+                ));
+            }
+        }
+
+        Ok(output)
+    }
+
     fn tool_get_ranked(
         &self,
         store: &Store,
@@ -854,6 +938,19 @@ impl McpServer {
                         "symbol": { "type": "string", "description": "Symbol name to analyze" },
                         "max_depth": { "type": "integer", "default": 3, "description": "Maximum traversal depth (hops). Use 1 for direct dependents only" },
                         "max_results": { "type": "integer", "default": 30, "description": "Maximum symbols to list (summary count always shown)" }
+                    },
+                    "required": ["symbol"]
+                }
+            }),
+            json!({
+                "name": "trace_data_flow",
+                "description": "Trace a symbol's data flow: upstream callers and downstream callees across files. Shows the call chain for understanding request paths and data pipelines.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": { "type": "string", "description": "Symbol name to trace" },
+                        "max_depth": { "type": "integer", "default": 3, "description": "Maximum traversal depth (hops)" },
+                        "max_results": { "type": "integer", "default": 20, "description": "Maximum symbols per direction" }
                     },
                     "required": ["symbol"]
                 }
