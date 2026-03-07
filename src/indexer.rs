@@ -1,7 +1,7 @@
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// Check if verbose logging is enabled via env vars.
 fn is_verbose() -> bool {
