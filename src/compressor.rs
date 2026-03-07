@@ -118,6 +118,17 @@ pub fn tfidf_rank(symbols: &[SymbolRecord], query: &str) -> Vec<(usize, f64)> {
 
         let mut terms_matched = 0usize;
         for qt in &query_terms {
+            // Skip very short terms (<=2 chars) in fuzzy TF-IDF to avoid
+            // "ai" matching "trait", "email", etc. Still allow exact name matches below.
+            if qt.len() <= 2 {
+                // Only count if it's an exact token match (not substring)
+                let exact_count = tokens.iter().filter(|t| *t == qt).count();
+                if exact_count > 0 {
+                    terms_matched += 1;
+                    score += exact_count as f64 / doc_len;
+                }
+                continue;
+            }
             let tf = tokens.iter().filter(|t| *t == qt).count() as f64 / doc_len;
             let idf = if let Some(&d) = df.get(qt) {
                 (total_docs / (d as f64 + 1.0)).ln() + 1.0
@@ -136,7 +147,7 @@ pub fn tfidf_rank(symbols: &[SymbolRecord], query: &str) -> Vec<(usize, f64)> {
         for qt in &query_terms {
             if name_lower == *qt {
                 score += 5.0;
-            } else if name_lower.contains(qt.as_str()) {
+            } else if qt.len() > 2 && name_lower.contains(qt.as_str()) {
                 score += 2.0;
             }
         }
@@ -144,6 +155,9 @@ pub fn tfidf_rank(symbols: &[SymbolRecord], query: &str) -> Vec<(usize, f64)> {
         // Boost file path matches (symbols in relevant directories)
         let path_lower = symbols[i].file_path.to_lowercase();
         for qt in &query_terms {
+            if qt.len() <= 2 {
+                continue; // Skip short terms for path matching
+            }
             if path_lower.contains(qt.as_str()) {
                 score += 1.5;
             }
