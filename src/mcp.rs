@@ -526,7 +526,7 @@ impl McpServer {
         let all_imports = store.get_all_imports()?;
         let graph = DepGraph::build(&all_symbols, &all_imports);
 
-        let dir = Direction::from_str(direction);
+        let dir = Direction::parse(direction);
         let deps = graph.get_dependencies(symbol, dir);
 
         if deps.is_empty() {
@@ -622,7 +622,11 @@ impl McpServer {
             by_file.entry(&imp.file_path).or_default().push(imp);
         }
 
-        let mut output = format!("{} imports across {} files:\n\n", results.len(), by_file.len());
+        let mut output = format!(
+            "{} imports across {} files:\n\n",
+            results.len(),
+            by_file.len()
+        );
         for (file, imps) in &by_file {
             output.push_str(&format!("{}:\n", file));
             for imp in imps {

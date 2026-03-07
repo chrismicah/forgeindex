@@ -9,7 +9,7 @@ ForgeIndex is a local-first MCP server that provides structural code indexing, t
 - **AST Parsing** — Tree-sitter-based parsing for Python, TypeScript, JavaScript, Rust, Go, Java, C/C++, Ruby
 - **Token Compression** — Skeleton views, TF-IDF ranking, and greedy knapsack packing reduce token payloads by 85–95%
 - **Dependency Graph** — Import-based graph with PageRank scoring and blast radius analysis
-- **MCP Server** — 12 tools exposed via JSON-RPC over stdio, compatible with Claude Desktop, Conductor, and any MCP client
+- **MCP Server** — 13 tools exposed via JSON-RPC over stdio, compatible with Claude Desktop, Conductor, and any MCP client
 - **Auto-Reindexing** — File watcher + git hooks keep the index fresh
 - **SQLite Store** — WAL-mode database with xxh3 content hashing for JIT invalidation
 - **Zero Config** — Works out of the box with sensible defaults
@@ -50,15 +50,16 @@ forgeindex serve
 
 | Tool | Description |
 |------|-------------|
-| `map_overview` | Hierarchical tree of all public symbols |
+| `map_overview` | Codebase map with tiered detail: `tree` (~5K tokens), `summary` (~15K), or `full` (signatures) |
 | `find_symbol` | Exact symbol lookup with signature and location |
-| `read_source` | Full source code of a specific symbol |
-| `search_symbols` | Fuzzy symbol search ranked by relevance |
+| `read_source` | Source code of a symbol, with smart truncation for large symbols (head + tail) |
+| `search_symbols` | Fuzzy search by name, signature, or docstring. Supports multi-word queries |
+| `search_imports` | Search import/require/use statements across all files |
 | `get_skeleton` | Skeletonized file view — signatures only |
 | `get_dependencies` | Direct dependencies or dependents |
 | `get_impact` | Transitive blast radius analysis |
 | `get_ranked_symbols` | Top symbols by PageRank importance |
-| `compress_context` | Optimal context within token budget |
+| `compress_context` | Optimal context within token budget (default 32K tokens) |
 | `pack_repo` | Full repo packed into single artifact |
 | `index_status` | Index health metrics |
 | `reindex` | Force re-index |
@@ -118,7 +119,7 @@ include_tests = false
 max_file_size_kb = 512
 
 [compression]
-default_token_budget = 4000
+default_token_budget = 32000
 skeleton_collapse_threshold_lines = 3
 aggregate_imports = true
 strip_comments = true

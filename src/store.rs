@@ -190,42 +190,84 @@ impl Store {
     }
 
     pub fn search_symbols(&self, query: &str, max_results: usize) -> Result<Vec<SymbolRecord>> {
-        // Tokenize query into words for multi-word search
         let words: Vec<&str> = query.split_whitespace().collect();
-
         if words.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Build WHERE clause: OR across words so "authentication login" finds symbols
-        // matching either term. Rank by how many terms match.
+        // Filter out very short words (<=2 chars) for LIKE matching to avoid
+        // "ai" matching "trait", "email", etc. Keep them for exact-name matching.
+        let significant_words: Vec<&str> = words.iter().copied().filter(|w| w.len() > 2).collect();
+
+        // If all words are short (e.g. query="ai"), still use them but require
+        // word-boundary-like matching (name starts with or matches exactly)
         let mut where_parts = Vec::new();
         let mut param_values: Vec<String> = Vec::new();
 
-        for word in &words {
-            let idx = param_values.len();
-            let p = idx + 1; // SQLite params are 1-indexed
-            where_parts.push(format!(
-                "(s.name LIKE ?{p} OR s.signature LIKE ?{p} OR COALESCE(s.docstring,'') LIKE ?{p})"
-            ));
-            param_values.push(format!("%{}%", word));
+        if significant_words.is_empty() {
+            // All words are short — use stricter matching: name/file path word boundaries
+            for word in &words {
+                let p = param_values.len() + 1;
+                let p2 = p + 1;
+                let p3 = p2 + 1;
+                where_parts.push(format!(
+                    "(LOWER(s.name) = LOWER(?{p}) OR LOWER(s.name) LIKE LOWER(?{p2}) \
+                     OR f.path LIKE ?{p3})"
+                ));
+                param_values.push(word.to_string());
+                param_values.push(format!("{}%", word)); // prefix match
+                param_values.push(format!("%/{}%", word)); // path component match
+            }
+        } else {
+            // Normal multi-word search: match significant words in name/sig/doc/path
+            for word in &significant_words {
+                let p = param_values.len() + 1;
+                where_parts.push(format!(
+                    "(s.name LIKE ?{p} OR s.signature LIKE ?{p} \
+                     OR COALESCE(s.docstring,'') LIKE ?{p} OR f.path LIKE ?{p})"
+                ));
+                param_values.push(format!("%{}%", word));
+            }
         }
 
         let where_clause = where_parts.join(" OR ");
 
-        // Ranking: exact name match > symbols matching more words > prefix match
+        // Ranking: exact name > multi-term match count > name match > sig match > path match
         let mut rank_parts = Vec::new();
+
+        // Exact name match gets top priority
         let exact_idx = param_values.len() + 1;
         param_values.push(query.to_string());
-        rank_parts.push(format!("CASE WHEN s.name = ?{} THEN 0 ELSE 10 END", exact_idx));
+        rank_parts.push(format!(
+            "CASE WHEN s.name = ?{} THEN -100 ELSE 0 END",
+            exact_idx
+        ));
 
-        // Boost symbols that match more words (subtract 3 for each matching word)
-        for (i, _word) in words.iter().enumerate() {
-            let p = i + 1;
+        // Score each word match: name match > path match > signature match
+        let search_words = if significant_words.is_empty() {
+            &words
+        } else {
+            &significant_words
+        };
+        for word in search_words {
+            let p = param_values.len() + 1;
+            param_values.push(format!("%{}%", word));
             rank_parts.push(format!(
-                "CASE WHEN s.name LIKE ?{p} THEN -3 WHEN s.signature LIKE ?{p} THEN -1 ELSE 0 END"
+                "CASE WHEN s.name LIKE ?{p} THEN -10 \
+                 WHEN f.path LIKE ?{p} THEN -5 \
+                 WHEN s.signature LIKE ?{p} THEN -3 \
+                 WHEN COALESCE(s.docstring,'') LIKE ?{p} THEN -1 \
+                 ELSE 0 END"
             ));
         }
+
+        // Penalize very common symbol kinds that are usually noise
+        rank_parts.push(
+            "CASE WHEN s.kind = 'variable' THEN 5 \
+             WHEN s.kind = 'const' THEN 3 \
+             ELSE 0 END"
+                .to_string(),
+        );
 
         let rank_expr = rank_parts.join(" + ");
         let limit_idx = param_values.len() + 1;

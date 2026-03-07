@@ -210,9 +210,7 @@ fn extract_node_symbols(node: Node, source: &[u8], lang: &str, out: &mut Vec<Sym
 // ─── Python ──────────────────────────────────────────────────────────
 
 fn python_visibility(name: &str) -> Visibility {
-    if name.starts_with("__") && !name.ends_with("__") {
-        Visibility::Private
-    } else if name.starts_with('_') {
+    if name.starts_with('_') {
         Visibility::Private
     } else {
         Visibility::Public
@@ -812,10 +810,8 @@ fn java_visibility(node: Node, source: &[u8]) -> Visibility {
         Visibility::Public
     } else if text.contains("private ") {
         Visibility::Private
-    } else if text.contains("protected ") {
-        Visibility::Internal
     } else {
-        Visibility::Internal // package-private
+        Visibility::Internal // protected or package-private
     }
 }
 
@@ -1338,7 +1334,7 @@ fn extract_imports(root: Node, source: &[u8], lang: &str) -> Vec<Import> {
                     .trim_end_matches(';')
                     .trim()
                     .to_string();
-                let name = path.split('.').last().unwrap_or("").to_string();
+                let name = path.split('.').next_back().unwrap_or("").to_string();
                 imports.push(Import {
                     raw_text: text,
                     source_module: Some(path),
