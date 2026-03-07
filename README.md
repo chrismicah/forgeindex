@@ -52,13 +52,13 @@ forgeindex serve
 |------|-------------|
 | `map_overview` | Codebase map with tiered detail: `tree` (~5K tokens), `summary` (~15K), or `full` (signatures) |
 | `find_symbol` | Exact symbol lookup with signature and location |
-| `read_source` | Source code of a symbol, with smart truncation for large symbols (head + tail) |
-| `search_symbols` | Fuzzy search by name, signature, or docstring. Supports multi-word queries |
+| `read_source` | Source code of a symbol. `mode="skeleton"` for signatures only (~100 tokens), `mode="full"` with head+tail truncation for large symbols |
+| `search_symbols` | Fuzzy search by name, signature, file path, or docstring. Short terms use prefix matching to avoid noise |
 | `search_imports` | Search import/require/use statements across all files |
 | `get_skeleton` | Skeletonized file view — signatures only |
 | `get_dependencies` | Direct dependencies or dependents |
 | `get_impact` | Transitive blast radius analysis |
-| `get_ranked_symbols` | Top symbols by PageRank importance |
+| `get_ranked_symbols` | Top symbols by PageRank importance. Optional `path` filter to scope to a directory |
 | `compress_context` | Optimal context within token budget (default 32K tokens) |
 | `pack_repo` | Full repo packed into single artifact |
 | `index_status` | Index health metrics |

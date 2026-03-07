@@ -185,7 +185,8 @@ impl McpServer {
                     .as_str()
                     .ok_or_else(|| anyhow!("missing 'symbol' parameter"))?;
                 let max_chars = args["max_chars"].as_u64().unwrap_or(20000) as usize;
-                self.tool_read_source(&store, symbol, max_chars)
+                let mode = args["mode"].as_str().unwrap_or("full");
+                self.tool_read_source(&store, symbol, max_chars, mode)
             }
             "search_symbols" => {
                 let query = args["query"]
@@ -216,7 +217,8 @@ impl McpServer {
             "get_ranked_symbols" => {
                 let top_n = args["top_n"].as_u64().unwrap_or(10) as usize;
                 let kind = args["kind"].as_str();
-                self.tool_get_ranked(&store, top_n, kind)
+                let path_filter = args["path"].as_str();
+                self.tool_get_ranked(&store, top_n, kind, path_filter)
             }
             "compress_context" => {
                 let query = args["query"]
@@ -432,6 +434,7 @@ impl McpServer {
         store: &Store,
         symbol_name: &str,
         max_chars: usize,
+        mode: &str,
     ) -> Result<String> {
         let results = store.find_symbol(symbol_name, None)?;
         if results.is_empty() {
@@ -439,6 +442,26 @@ impl McpServer {
         }
 
         let sym = &results[0];
+
+        // Skeleton mode: return signature + child signatures without source body
+        if mode == "skeleton" {
+            let file_symbols = store.get_file_symbols(&sym.file_path)?;
+            let mut output = format!("// {} (skeleton)\n", sym.file_path);
+            output.push_str(&sym.signature);
+            output.push('\n');
+            let children: Vec<&_> = file_symbols
+                .iter()
+                .filter(|s| s.parent_id == Some(sym.id))
+                .collect();
+            for child in &children {
+                output.push_str(&format!("  {}\n", child.signature));
+            }
+            if children.is_empty() {
+                output.push_str("  ...\n");
+            }
+            return Ok(output);
+        }
+
         let file_path = self.root_path.join(&sym.file_path);
         let source = std::fs::read_to_string(&file_path)
             .map_err(|_| anyhow!("Cannot read source file: {}", sym.file_path))?;
@@ -454,7 +477,6 @@ impl McpServer {
                 sym.file_path, sym.byte_start, sym.byte_end, fragment
             ))
         } else {
-            // Truncate but keep the beginning and end of the symbol for context
             let head_budget = max_chars * 3 / 4;
             let tail_budget = max_chars - head_budget;
             let head = &fragment[..head_budget.min(fragment.len())];
@@ -568,19 +590,41 @@ impl McpServer {
         Ok(output)
     }
 
-    fn tool_get_ranked(&self, store: &Store, top_n: usize, kind: Option<&str>) -> Result<String> {
+    fn tool_get_ranked(
+        &self,
+        store: &Store,
+        top_n: usize,
+        kind: Option<&str>,
+        path_filter: Option<&str>,
+    ) -> Result<String> {
         let all_symbols = store.get_all_symbols()?;
         let all_imports = store.get_all_imports()?;
         let graph = DepGraph::build(&all_symbols, &all_imports);
 
-        let ranked = graph.get_ranked(top_n, kind);
+        // Get more results than needed if we're filtering, then trim
+        let fetch_n = if path_filter.is_some() {
+            top_n * 10
+        } else {
+            top_n
+        };
+        let ranked = graph.get_ranked(fetch_n, kind);
 
-        if ranked.is_empty() {
+        let filtered: Vec<_> = if let Some(prefix) = path_filter {
+            ranked
+                .into_iter()
+                .filter(|s| s.file_path.starts_with(prefix))
+                .take(top_n)
+                .collect()
+        } else {
+            ranked.into_iter().take(top_n).collect()
+        };
+
+        if filtered.is_empty() {
             return Ok("No ranked symbols found.".to_string());
         }
 
-        let mut output = format!("Top {} symbols by PageRank:\n", ranked.len());
-        for (i, sym) in ranked.iter().enumerate() {
+        let mut output = format!("Top {} symbols by PageRank:\n", filtered.len());
+        for (i, sym) in filtered.iter().enumerate() {
             output.push_str(&format!(
                 "  {}. {} [{}] — {} (score: {:.6})\n",
                 i + 1,
@@ -698,12 +742,13 @@ impl McpServer {
             }),
             json!({
                 "name": "read_source",
-                "description": "Read the source code of a specific symbol. Large symbols are truncated to max_chars (head + tail) to save tokens.",
+                "description": "Read the source code of a specific symbol. Use mode='skeleton' for large symbols to get just signatures (~100 tokens vs 20K+ chars).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "symbol": { "type": "string", "description": "Symbol name to read" },
-                        "max_chars": { "type": "integer", "default": 20000, "description": "Maximum characters to return. Large symbols show head + tail with omission marker." }
+                        "max_chars": { "type": "integer", "default": 20000, "description": "Maximum characters for 'full' mode. Large symbols show head + tail." },
+                        "mode": { "type": "string", "enum": ["full", "skeleton"], "default": "full", "description": "full = source code (truncated if large), skeleton = signatures only" }
                     },
                     "required": ["symbol"]
                 }
@@ -757,12 +802,13 @@ impl McpServer {
             }),
             json!({
                 "name": "get_ranked_symbols",
-                "description": "Get top N symbols ranked by PageRank importance score.",
+                "description": "Get top N symbols ranked by PageRank importance. Use 'path' to scope to a directory (e.g. 'backend-service/src/services/').",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "top_n": { "type": "integer", "default": 10, "description": "Number of top symbols" },
-                        "kind": { "type": "string", "enum": ["function","class","method","type","const","interface"], "description": "Optional: filter by kind" }
+                        "kind": { "type": "string", "enum": ["function","class","method","type","const","interface"], "description": "Optional: filter by kind" },
+                        "path": { "type": "string", "description": "Optional: filter to symbols in files under this path prefix" }
                     }
                 }
             }),
