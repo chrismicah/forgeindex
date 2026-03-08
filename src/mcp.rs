@@ -651,6 +651,9 @@ impl McpServer {
         if total > max_results {
             output.push_str(&format!("  ... and {} more\n", total - max_results));
         }
+        if total > max_results {
+            output.push_str(&format!("  ... and {} more\n", total - max_results));
+        }
 
         Ok(output)
     }
