@@ -83,12 +83,21 @@ pub struct Import {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reference {
+    pub name: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub context: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedFile {
     pub path: String,
     pub language: String,
     pub hash: u64,
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
+    pub references: Vec<Reference>,
 }
 
 pub fn detect_language(path: &Path) -> Option<String> {
@@ -152,6 +161,7 @@ pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
 
     let symbols = extract_symbols(root, source_bytes, &lang_name);
     let imports = extract_imports(root, source_bytes, &lang_name);
+    let references = extract_references(root, source_bytes, &lang_name);
 
     Ok(ParsedFile {
         path: path.to_string_lossy().replace('\\', "/"),
@@ -159,6 +169,7 @@ pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
         hash,
         symbols,
         imports,
+        references,
     })
 }
 
@@ -1382,6 +1393,101 @@ fn extract_imports(root: Node, source: &[u8], lang: &str) -> Vec<Import> {
     imports
 }
 
+// ─── Reference extraction ───────────────────────────────────────────
+
+fn extract_references(root: Node, source: &[u8], lang: &str) -> Vec<Reference> {
+    let mut references = Vec::new();
+    walk_tree(root, &mut |node| {
+        if !is_call_node(lang, node.kind()) {
+            return;
+        }
+
+        let Some(callee) = call_target_node(node, lang) else {
+            return;
+        };
+        let Some(name) = extract_reference_name(callee, source) else {
+            return;
+        };
+
+        references.push(Reference {
+            name,
+            byte_start: callee.start_byte(),
+            byte_end: callee.end_byte(),
+            context: "call".to_string(),
+        });
+    });
+
+    references.sort_by_key(|r| (r.byte_start, r.byte_end, r.name.clone()));
+    references.dedup_by(|a, b| {
+        a.name == b.name && a.byte_start == b.byte_start && a.byte_end == b.byte_end
+    });
+    references
+}
+
+fn walk_tree(node: Node, visit: &mut dyn FnMut(Node)) {
+    visit(node);
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_tree(child, visit);
+    }
+}
+
+fn is_call_node(lang: &str, kind: &str) -> bool {
+    match lang {
+        "python" => kind == "call",
+        "typescript" | "tsx" | "javascript" | "rust" | "go" | "c" | "cpp" => {
+            kind == "call_expression"
+        }
+        "java" => kind == "method_invocation" || kind == "object_creation_expression",
+        "ruby" => kind == "call",
+        _ => false,
+    }
+}
+
+fn call_target_node<'a>(node: Node<'a>, lang: &str) -> Option<Node<'a>> {
+    match lang {
+        "python" | "typescript" | "tsx" | "javascript" | "rust" | "go" | "c" | "cpp" => {
+            node.child_by_field_name("function")
+        }
+        "java" => node
+            .child_by_field_name("name")
+            .or_else(|| node.child_by_field_name("type")),
+        "ruby" => node
+            .child_by_field_name("method")
+            .or_else(|| node.child_by_field_name("name")),
+        _ => None,
+    }
+}
+
+fn extract_reference_name(node: Node, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" | "type_identifier" | "field_identifier" | "property_identifier" => {
+            sanitize_reference_name(node_text(node, source))
+        }
+        _ => {
+            let mut result = None;
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if let Some(name) = extract_reference_name(child, source) {
+                    result = Some(name);
+                }
+            }
+            result
+        }
+    }
+}
+
+fn sanitize_reference_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if matches!(trimmed, "self" | "super" | "this" | "crate") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 /// Flatten all symbols (including children) into a linear list.
 pub fn flatten_symbols(symbols: &[Symbol]) -> Vec<&Symbol> {
     let mut result = Vec::new();
@@ -1399,4 +1505,32 @@ pub fn symbol_source<'a>(sym: &Symbol, source: &'a str) -> &'a str {
     let start = sym.byte_start.min(source.len());
     let end = sym.byte_end.min(source.len());
     &source[start..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_file;
+    use std::path::Path;
+
+    #[test]
+    fn extracts_python_call_references() {
+        let parsed = parse_file(
+            Path::new("main.py"),
+            r#"
+from pkg.util import helper
+
+def target():
+    helper()
+
+def caller():
+    target()
+"#,
+        )
+        .expect("python should parse");
+
+        let names: Vec<_> = parsed.references.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"helper"));
+        assert!(names.contains(&"target"));
+        assert!(parsed.references.iter().all(|r| r.context == "call"));
+    }
 }
