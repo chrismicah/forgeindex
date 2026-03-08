@@ -179,7 +179,7 @@ impl DepGraph {
             }
         }
 
-        self.names_for_ids(result_ids.into_iter())
+        self.names_for_ids(result_ids)
     }
 
     /// Compute blast radius: all transitive dependents (who would be affected
@@ -201,7 +201,7 @@ impl DepGraph {
             impacted.remove(start_id);
         }
 
-        self.names_for_ids(impacted.into_iter())
+        self.names_for_ids(impacted)
     }
 
     /// Look up the file path for a symbol.
@@ -246,7 +246,7 @@ impl DepGraph {
             related.remove(start_id);
         }
 
-        self.names_for_ids(related.into_iter())
+        self.names_for_ids(related)
     }
 
     /// Get top N symbols ranked by PageRank.
