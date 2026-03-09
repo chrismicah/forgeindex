@@ -102,6 +102,8 @@ fn cmd_status(root: &Path) -> Result<()> {
     println!("Files:      {}", stats.file_count);
     println!("Symbols:    {}", stats.symbol_count);
     println!("Imports:    {}", stats.import_count);
+    println!("References: {}", stats.reference_count);
+    println!("Edges:      {}", stats.edge_count);
     println!("Languages:  {}", stats.languages.join(", "));
     println!("Database:   {}", db_path.display());
 
@@ -147,7 +149,7 @@ fn cmd_query(root: &Path, query: &str, max_results: usize) -> Result<()> {
     for sym in &results {
         println!(
             "[{}] {} ({}) — {}",
-            sym.kind, sym.name, sym.visibility, sym.file_path
+            sym.kind, sym.qualified_name, sym.visibility, sym.file_path
         );
         println!("  {}", sym.signature);
         if let Some(ref doc) = sym.docstring {

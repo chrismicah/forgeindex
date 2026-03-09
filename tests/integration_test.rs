@@ -187,6 +187,11 @@ fn test_store_upsert_and_query() {
     let stats = store.get_stats().unwrap();
     assert_eq!(stats.file_count, 1);
     assert!(stats.symbol_count > 0);
+
+    let symbols = store.get_all_symbols().unwrap();
+    assert!(symbols
+        .iter()
+        .any(|symbol| symbol.qualified_name.ends_with("utils.py::calculate_total")));
 }
 
 #[test]
@@ -320,9 +325,8 @@ fn test_dependency_graph_build() {
     }
 
     let all_symbols = store.get_all_symbols().unwrap();
-    let all_imports = store.get_all_imports().unwrap();
-
-    let graph = DepGraph::build(&all_symbols, &all_imports);
+    let all_edges = store.get_all_edges().unwrap();
+    let graph = DepGraph::build(&all_symbols, &all_edges);
 
     // Should have PageRank scores
     let ranked = graph.get_ranked(5, None);
@@ -341,8 +345,8 @@ fn test_pagerank_scores() {
     }
 
     let all_symbols = store.get_all_symbols().unwrap();
-    let all_imports = store.get_all_imports().unwrap();
-    let graph = DepGraph::build(&all_symbols, &all_imports);
+    let all_edges = store.get_all_edges().unwrap();
+    let graph = DepGraph::build(&all_symbols, &all_edges);
 
     let ranked = graph.get_ranked(20, None);
     // All scores should be positive
@@ -482,8 +486,8 @@ fn test_full_pipeline() {
 
     // 5. Build dependency graph
     let all_symbols = store.get_all_symbols().unwrap();
-    let all_imports = store.get_all_imports().unwrap();
-    let graph = DepGraph::build(&all_symbols, &all_imports);
+    let all_edges = store.get_all_edges().unwrap();
+    let graph = DepGraph::build(&all_symbols, &all_edges);
 
     // 6. Get ranked symbols
     let ranked = graph.get_ranked(5, None);

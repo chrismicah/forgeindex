@@ -92,6 +92,8 @@ pub fn tfidf_rank(symbols: &[SymbolRecord], query: &str) -> Vec<(usize, f64)> {
         .map(|s| {
             let mut text = s.name.clone();
             text.push(' ');
+            text.push_str(&s.qualified_name);
+            text.push(' ');
             text.push_str(&s.signature);
             text.push(' ');
             text.push_str(&s.file_path);
@@ -144,9 +146,14 @@ pub fn tfidf_rank(symbols: &[SymbolRecord], query: &str) -> Vec<(usize, f64)> {
 
         // Boost exact name matches
         let name_lower = symbols[i].name.to_lowercase();
+        let qualified_name_lower = symbols[i].qualified_name.to_lowercase();
         for qt in &query_terms {
-            if name_lower == *qt {
+            if qualified_name_lower == *qt {
+                score += 6.0;
+            } else if name_lower == *qt {
                 score += 5.0;
+            } else if qt.len() > 2 && qualified_name_lower.contains(qt.as_str()) {
+                score += 2.5;
             } else if qt.len() > 2 && name_lower.contains(qt.as_str()) {
                 score += 2.0;
             }

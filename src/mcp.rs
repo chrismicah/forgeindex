@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info};
@@ -423,7 +423,8 @@ impl McpServer {
 
         let mut output = String::new();
         for sym in &results {
-            output.push_str(&format!("Name: {}\n", sym.name));
+            output.push_str(&format!("Name: {}\n", sym.qualified_name));
+            output.push_str(&format!("Simple Name: {}\n", sym.name));
             output.push_str(&format!("Kind: {}\n", sym.kind));
             output.push_str(&format!("File: {}\n", sym.file_path));
             output.push_str(&format!("Visibility: {}\n", sym.visibility));
@@ -526,7 +527,7 @@ impl McpServer {
         for sym in &results {
             output.push_str(&format!(
                 "[{}] {} ({}) — {}\n  {}\n",
-                sym.kind, sym.name, sym.visibility, sym.file_path, sym.signature
+                sym.kind, sym.qualified_name, sym.visibility, sym.file_path, sym.signature
             ));
         }
 
@@ -557,76 +558,22 @@ impl McpServer {
         direction: &str,
         max_results: usize,
     ) -> Result<String> {
-        // Use import-name-level matching instead of the file-level graph.
-        // This gives precise results: only symbols directly imported by name.
         let all_symbols = store.get_all_symbols()?;
-        let all_imports = store.get_all_imports()?;
-
-        // Find the symbol's file
-        let sym_file = all_symbols
-            .iter()
-            .find(|s| s.name == symbol)
-            .map(|s| s.file_path.as_str());
-
+        let all_edges = store.get_all_edges()?;
+        let graph = DepGraph::build(&all_symbols, &all_edges);
         let dir = Direction::parse(direction);
-        let mut results: Vec<(String, String, String)> = Vec::new(); // (name, kind, file)
-
-        // INBOUND: files that import THIS symbol by name
-        if matches!(dir, Direction::In | Direction::Both) {
-            // Find import records that mention this symbol name
-            let importing_files: Vec<&str> = all_imports
-                .iter()
-                .filter(|imp| {
-                    imp.raw_text
-                        .split(|c: char| !c.is_alphanumeric() && c != '_')
-                        .any(|part| part == symbol)
-                })
-                .map(|imp| imp.file_path.as_str())
-                .collect();
-
-            // Get top-level symbols from those importing files (likely callers)
-            for sym in &all_symbols {
-                if importing_files.contains(&sym.file_path.as_str())
-                    && sym.parent_id.is_none()
-                    && sym.name != symbol
-                {
-                    results.push((sym.name.clone(), sym.kind.clone(), sym.file_path.clone()));
-                }
-            }
-        }
-
-        // OUTBOUND: symbols that THIS symbol's file imports by name
-        if matches!(dir, Direction::Out | Direction::Both) {
-            if let Some(file) = sym_file {
-                // Get imports from the symbol's file
-                let file_imports: Vec<&str> = all_imports
+        let mut results: Vec<(String, String, String)> = graph
+            .get_dependencies(symbol, dir)
+            .into_iter()
+            .map(|name| {
+                let (kind, file) = all_symbols
                     .iter()
-                    .filter(|imp| imp.file_path == file)
-                    .flat_map(|imp| {
-                        imp.raw_text
-                            .split(|c: char| !c.is_alphanumeric() && c != '_')
-                            .collect::<Vec<_>>()
-                    })
-                    .collect();
-
-                // Match imported names to known symbols
-                for sym in &all_symbols {
-                    if sym.name != symbol
-                        && file_imports.contains(&sym.name.as_str())
-                        && sym.parent_id.is_none()
-                    {
-                        // Avoid duplicates from inbound pass
-                        if !results.iter().any(|(n, _, _)| n == &sym.name) {
-                            results.push((
-                                sym.name.clone(),
-                                sym.kind.clone(),
-                                sym.file_path.clone(),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
+                    .find(|sym| sym.qualified_name == name || sym.name == name)
+                    .map(|sym| (sym.kind.clone(), sym.file_path.clone()))
+                    .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
+                (name, kind, file)
+            })
+            .collect();
 
         if results.is_empty() {
             return Ok(format!(
@@ -651,9 +598,6 @@ impl McpServer {
         if total > max_results {
             output.push_str(&format!("  ... and {} more\n", total - max_results));
         }
-        if total > max_results {
-            output.push_str(&format!("  ... and {} more\n", total - max_results));
-        }
 
         Ok(output)
     }
@@ -666,8 +610,8 @@ impl McpServer {
         max_results: usize,
     ) -> Result<String> {
         let all_symbols = store.get_all_symbols()?;
-        let all_imports = store.get_all_imports()?;
-        let graph = DepGraph::build(&all_symbols, &all_imports);
+        let all_edges = store.get_all_edges()?;
+        let graph = DepGraph::build(&all_symbols, &all_edges);
 
         let impact = graph.get_impact_bounded(symbol, max_depth);
 
@@ -724,132 +668,38 @@ impl McpServer {
         max_depth: usize,
         max_results: usize,
     ) -> Result<String> {
-        // Use import-name-level matching instead of the file-level graph.
-        // BFS in each direction using direct import name references.
         let all_symbols = store.get_all_symbols()?;
-        let all_imports = store.get_all_imports()?;
+        let all_edges = store.get_all_edges()?;
+        let graph = DepGraph::build(&all_symbols, &all_edges);
 
-        // Build lookup helpers
         let sym_meta: HashMap<&str, (&str, &str)> = all_symbols
             .iter()
-            .map(|s| (s.name.as_str(), (s.kind.as_str(), s.file_path.as_str())))
+            .map(|s| {
+                (
+                    s.qualified_name.as_str(),
+                    (s.kind.as_str(), s.file_path.as_str()),
+                )
+            })
             .collect();
 
-        let (sym_kind, sym_file) = sym_meta
-            .get(symbol)
-            .copied()
-            .unwrap_or(("symbol", "unknown"));
-
-        // Helper: given a symbol name, find files that import it
-        let importers_of = |name: &str| -> Vec<&str> {
-            all_imports
-                .iter()
-                .filter(|imp| {
-                    imp.raw_text
-                        .split(|c: char| !c.is_alphanumeric() && c != '_')
-                        .any(|part| part == name)
-                })
-                .map(|imp| imp.file_path.as_str())
-                .collect()
-        };
-
-        // Helper: given a file, find symbol names imported by that file
-        let imports_of_file = |file: &str| -> Vec<&str> {
-            all_imports
-                .iter()
-                .filter(|imp| imp.file_path == file)
-                .flat_map(|imp| {
-                    imp.raw_text
-                        .split(|c: char| !c.is_alphanumeric() && c != '_')
-                        .collect::<Vec<_>>()
-                })
-                .filter(|name| sym_meta.contains_key(name))
-                .collect()
-        };
-
-        // Top-level symbols only (for output)
-        let top_level: HashSet<&str> = all_symbols
+        let current_symbol = all_symbols
             .iter()
-            .filter(|s| s.parent_id.is_none())
-            .map(|s| s.name.as_str())
-            .collect();
-
-        // File -> top-level symbols mapping
-        let mut file_symbols: HashMap<&str, Vec<&str>> = HashMap::new();
-        for sym in &all_symbols {
-            if sym.parent_id.is_none() {
-                file_symbols
-                    .entry(sym.file_path.as_str())
-                    .or_default()
-                    .push(sym.name.as_str());
-            }
-        }
-
-        // BFS upstream: who imports this symbol (and transitively, who imports them)
-        let mut upstream: Vec<(String, usize)> = Vec::new();
-        {
-            let mut visited: HashSet<String> = HashSet::new();
-            let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-            queue.push_back((symbol.to_string(), 0));
-            visited.insert(symbol.to_string());
-
-            while let Some((current, d)) = queue.pop_front() {
-                if d > 0 && top_level.contains(current.as_str()) {
-                    upstream.push((current.clone(), d));
-                }
-                if d >= max_depth {
-                    continue;
-                }
-                // Find files that import `current` by name
-                let importing_files = importers_of(&current);
-                for file in importing_files {
-                    if let Some(syms) = file_symbols.get(file) {
-                        for &s in syms {
-                            if s != symbol && !visited.contains(s) {
-                                visited.insert(s.to_string());
-                                queue.push_back((s.to_string(), d + 1));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // BFS downstream: what does this symbol's file import (and transitively)
-        let mut downstream: Vec<(String, usize)> = Vec::new();
-        {
-            let mut visited: HashSet<String> = HashSet::new();
-            let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-            queue.push_back((symbol.to_string(), 0));
-            visited.insert(symbol.to_string());
-
-            while let Some((current, d)) = queue.pop_front() {
-                if d > 0 && top_level.contains(current.as_str()) {
-                    downstream.push((current.clone(), d));
-                }
-                if d >= max_depth {
-                    continue;
-                }
-                // Find what current's file imports
-                if let Some((_, file)) = sym_meta.get(current.as_str()) {
-                    let imported_names = imports_of_file(file);
-                    for name in imported_names {
-                        if name != symbol && !visited.contains(name) {
-                            visited.insert(name.to_string());
-                            queue.push_back((name.to_string(), d + 1));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Sort by depth then alphabetically
-        upstream.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        downstream.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+            .find(|sym| sym.qualified_name == symbol)
+            .or_else(|| all_symbols.iter().find(|sym| sym.name == symbol));
+        let (sym_kind, sym_file, sym_name) = current_symbol
+            .map(|sym| {
+                (
+                    sym.kind.as_str(),
+                    sym.file_path.as_str(),
+                    sym.qualified_name.as_str(),
+                )
+            })
+            .unwrap_or(("symbol", "unknown", symbol));
+        let (upstream, downstream) = graph.trace_flow(symbol, max_depth);
 
         let mut output = format!(
             "Data flow trace for {} [{}] in {}:\n\n",
-            symbol, sym_kind, sym_file
+            sym_name, sym_kind, sym_file
         );
 
         // Upstream
@@ -913,8 +763,8 @@ impl McpServer {
         path_filter: Option<&str>,
     ) -> Result<String> {
         let all_symbols = store.get_all_symbols()?;
-        let all_imports = store.get_all_imports()?;
-        let graph = DepGraph::build(&all_symbols, &all_imports);
+        let all_edges = store.get_all_edges()?;
+        let graph = DepGraph::build(&all_symbols, &all_edges);
 
         // Get more results than needed if we're filtering, then trim
         let fetch_n = if path_filter.is_some() {
@@ -1003,6 +853,8 @@ impl McpServer {
         output.push_str(&format!("Files indexed: {}\n", stats.file_count));
         output.push_str(&format!("Symbols: {}\n", stats.symbol_count));
         output.push_str(&format!("Imports tracked: {}\n", stats.import_count));
+        output.push_str(&format!("References tracked: {}\n", stats.reference_count));
+        output.push_str(&format!("Resolved edges: {}\n", stats.edge_count));
         output.push_str(&format!("Languages: {}\n", stats.languages.join(", ")));
         output.push_str(&format!(
             "Database: {}\n",
