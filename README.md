@@ -26,6 +26,24 @@ curl -fsSL https://raw.githubusercontent.com/chrismicah/forgeindex/main/install.
 cargo install --git https://github.com/chrismicah/forgeindex.git
 ```
 
+**From a local clone (replaces the global binary in `~/.cargo/bin`):**
+```bash
+git clone https://github.com/chrismicah/forgeindex.git
+cd forgeindex
+cargo install --path . --force
+```
+
+If you already have ForgeIndex installed globally and want to replace it with the current
+checkout, run:
+
+```bash
+cd /path/to/forgeindex
+cargo install --path . --force
+```
+
+This updates the single `forgeindex` binary on your PATH, usually
+`~/.cargo/bin/forgeindex`.
+
 ## Quick Start
 
 ```bash
@@ -176,6 +194,7 @@ The binary will be at `target/release/forgeindex`.
 
 - [Design Document](DESIGN.md) — full architecture and specification
 - [MCP Tool Reference](docs/MCP_TOOLS.md) — complete tool docs for agent authors
+- [Updating ForgeIndex](docs/UPDATING.md) — how to reinstall the global binary and what to do after pulling MCP updates
 
 ## License
 
