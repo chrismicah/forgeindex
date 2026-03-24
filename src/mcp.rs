@@ -484,10 +484,14 @@ impl McpServer {
         let fragment = &source[start..end];
         let total_chars = fragment.len();
 
+        // Convert byte offsets to 1-based line numbers for human-readable output
+        let start_line = source[..start].matches('\n').count() + 1;
+        let end_line = source[..end].matches('\n').count() + 1;
+
         if total_chars <= max_chars {
             Ok(format!(
-                "// {}:{}-{}\n{}",
-                sym.file_path, sym.byte_start, sym.byte_end, fragment
+                "// {}:L{}-L{}\n{}",
+                sym.file_path, start_line, end_line, fragment
             ))
         } else {
             let head_budget = max_chars * 3 / 4;
@@ -498,10 +502,10 @@ impl McpServer {
             let omitted = total_chars - head_budget - tail_budget;
 
             Ok(format!(
-                "// {}:{}-{} ({} chars total, showing first {} + last {})\n{}\n\n// ... ({} chars omitted) ...\n\n{}",
+                "// {}:L{}-L{} ({} chars total, showing first {} + last {})\n{}\n\n// ... ({} chars omitted) ...\n\n{}",
                 sym.file_path,
-                sym.byte_start,
-                sym.byte_end,
+                start_line,
+                end_line,
                 total_chars,
                 head_budget,
                 tail_budget,
