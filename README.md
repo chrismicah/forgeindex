@@ -44,6 +44,21 @@ cargo install --path . --force
 This updates the single `forgeindex` binary on your PATH, usually
 `~/.cargo/bin/forgeindex`.
 
+## Updating
+
+```bash
+# Pull latest and reinstall
+cd /path/to/forgeindex
+git pull
+cargo install --path . --force
+
+# Then rebuild your project index
+cd /path/to/your/project
+forgeindex reindex
+```
+
+See [Updating ForgeIndex](docs/UPDATING.md) for full details including when a clean rebuild is needed.
+
 ## Quick Start
 
 ```bash
