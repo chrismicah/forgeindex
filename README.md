@@ -1,6 +1,17 @@
-# ForgeIndex
+<p align="center">
+  <img src="assets/logo.svg" width="140" alt="ForgeIndex logo">
+</p>
 
-**AST-driven codebase intelligence for agentic workflows.**
+<h1 align="center">ForgeIndex</h1>
+
+<p align="center">
+  <a href="https://github.com/chrismicah/forgeindex/actions/workflows/ci.yml"><img src="https://github.com/chrismicah/forgeindex/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/price-free%20forever-success" alt="Free">
+  <img src="https://img.shields.io/badge/rust-1.75%2B-orange" alt="Rust 1.75+">
+</p>
+
+**AST-driven codebase intelligence for agentic workflows.** Free and open source, forever.
 
 ForgeIndex is a local-first MCP server that provides structural code indexing, token compression, and dependency analysis to autonomous coding agents. It reduces per-session token usage by 90%+ compared to raw file reads.
 
@@ -16,10 +27,17 @@ ForgeIndex is a local-first MCP server that provides structural code indexing, t
 
 ## Install
 
-**One line:**
+**One line (downloads a prebuilt binary, falls back to building from source):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/chrismicah/forgeindex/main/install.sh | sh
 ```
+
+**Homebrew:**
+```bash
+brew install --build-from-source ./Formula/forgeindex.rb
+```
+
+**Prebuilt binaries** for macOS (Apple Silicon + Intel), Linux (x86_64 + arm64), and Windows are attached to each [GitHub release](https://github.com/chrismicah/forgeindex/releases).
 
 **From source:**
 ```bash
@@ -197,7 +215,7 @@ log_level = "warn"
 
 ## Building
 
-Requires Rust 1.70+ and a C compiler (for tree-sitter grammars).
+Requires Rust 1.75+ and a C compiler (for tree-sitter grammars).
 
 ```bash
 cargo build --release
@@ -210,6 +228,7 @@ The binary will be at `target/release/forgeindex`.
 - [Design Document](DESIGN.md) — full architecture and specification
 - [MCP Tool Reference](docs/MCP_TOOLS.md) — complete tool docs for agent authors
 - [Updating ForgeIndex](docs/UPDATING.md) — how to reinstall the global binary and what to do after pulling MCP updates
+- [Changelog](CHANGELOG.md) — release history
 
 ## License
 

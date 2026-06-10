@@ -294,25 +294,14 @@ impl Store {
     }
 
     pub fn find_symbol(&self, name: &str, kind: Option<&str>) -> Result<Vec<SymbolRecord>> {
-        let query = if let Some(k) = kind {
-            format!(
-                "SELECT s.id, f.path, s.name, COALESCE(s.qualified_name, ''), s.kind, \
-                 s.visibility, s.signature, s.docstring, s.byte_start, s.byte_end, \
-                 s.parent_symbol_id \
-                 FROM symbols s JOIN files f ON s.file_id = f.id \
-                 WHERE (s.qualified_name = ?1 OR s.name = ?1) AND s.kind = '{}'",
-                k
-            )
-        } else {
-            "SELECT s.id, f.path, s.name, COALESCE(s.qualified_name, ''), s.kind, \
+        // ?2 is NULL when no kind filter is given; the OR short-circuits the filter.
+        let query = "SELECT s.id, f.path, s.name, COALESCE(s.qualified_name, ''), s.kind, \
              s.visibility, s.signature, s.docstring, s.byte_start, s.byte_end, s.parent_symbol_id \
              FROM symbols s JOIN files f ON s.file_id = f.id \
-             WHERE s.qualified_name = ?1 OR s.name = ?1"
-                .to_string()
-        };
+             WHERE (s.qualified_name = ?1 OR s.name = ?1) AND (?2 IS NULL OR s.kind = ?2)";
 
-        let mut stmt = self.conn.prepare(&query)?;
-        let rows = stmt.query_map(params![name], |row| {
+        let mut stmt = self.conn.prepare(query)?;
+        let rows = stmt.query_map(params![name, kind], |row| {
             Ok(SymbolRecord {
                 id: row.get(0)?,
                 file_path: row.get(1)?,

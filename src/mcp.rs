@@ -21,6 +21,20 @@ impl McpServer {
         Self { root_path, config }
     }
 
+    /// Resolve a relative file path against the project root, rejecting paths
+    /// that escape it (e.g. `../../etc/passwd` or absolute paths).
+    fn resolve_in_root(&self, rel_path: &str) -> Result<PathBuf> {
+        let candidate = Path::new(rel_path);
+        if candidate.is_absolute()
+            || candidate
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(anyhow!("INVALID_PATH: {} escapes project root", rel_path));
+        }
+        Ok(self.root_path.join(candidate))
+    }
+
     pub fn run(&self) -> Result<()> {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
@@ -166,6 +180,12 @@ impl McpServer {
 
     fn call_tool(&self, name: &str, args: &Value) -> Result<String> {
         let db_path = Config::db_path(&self.root_path);
+        if !db_path.exists() {
+            return Err(anyhow!(
+                "NO_INDEX: no index found at {}. Run `forgeindex init` in the project root first.",
+                db_path.display()
+            ));
+        }
         let store = Store::open(&db_path)?;
 
         match name {
@@ -475,12 +495,26 @@ impl McpServer {
             return Ok(output);
         }
 
-        let file_path = self.root_path.join(&sym.file_path);
+        let file_path = self.resolve_in_root(&sym.file_path)?;
         let source = std::fs::read_to_string(&file_path)
             .map_err(|_| anyhow!("Cannot read source file: {}", sym.file_path))?;
 
-        let start = sym.byte_start.min(source.len());
-        let end = sym.byte_end.min(source.len());
+        // Clamp byte offsets to the file and to valid UTF-8 boundaries — the
+        // file may have changed since indexing, leaving stale offsets.
+        let mut start = sym.byte_start.min(source.len());
+        let mut end = sym.byte_end.min(source.len());
+        if start > end {
+            return Err(anyhow!(
+                "STALE_INDEX: byte range for {} is invalid; run `forgeindex reindex`",
+                symbol_name
+            ));
+        }
+        while start > 0 && !source.is_char_boundary(start) {
+            start -= 1;
+        }
+        while end < source.len() && !source.is_char_boundary(end) {
+            end += 1;
+        }
         let fragment = &source[start..end];
         let total_chars = fragment.len();
 
@@ -496,8 +530,15 @@ impl McpServer {
         } else {
             let head_budget = max_chars * 3 / 4;
             let tail_budget = max_chars - head_budget;
-            let head = &fragment[..head_budget.min(fragment.len())];
-            let tail_start = fragment.len().saturating_sub(tail_budget);
+            let mut head_end = head_budget.min(fragment.len());
+            while head_end > 0 && !fragment.is_char_boundary(head_end) {
+                head_end -= 1;
+            }
+            let head = &fragment[..head_end];
+            let mut tail_start = fragment.len().saturating_sub(tail_budget);
+            while tail_start < fragment.len() && !fragment.is_char_boundary(tail_start) {
+                tail_start += 1;
+            }
             let tail = &fragment[tail_start..];
             let omitted = total_chars - head_budget - tail_budget;
 
@@ -545,7 +586,7 @@ impl McpServer {
         }
 
         // Read source for import extraction
-        let full_path = self.root_path.join(file_path);
+        let full_path = self.resolve_in_root(file_path)?;
         let source = std::fs::read_to_string(&full_path).unwrap_or_default();
 
         Ok(compressor::skeleton(

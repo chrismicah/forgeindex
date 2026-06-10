@@ -1,0 +1,22 @@
+<svg width="760" height="160" viewBox="0 0 760 160" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ForgeIndex">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="160" y2="160" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B1F2A"/>
+      <stop offset="1" stop-color="#0D1017"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Icon -->
+  <g>
+    <rect width="160" height="160" rx="36" fill="url(#bg)"/>
+    <path d="M80 30 L115 55 L103.75 63.125 L80 46.25 L56.25 63.125 L45 55 Z" fill="#FFD166"/>
+    <path d="M80 58.125 L122.5 88.125 L111.25 96.25 L80 74.375 L48.75 96.25 L37.5 88.125 Z" fill="#FF8C42"/>
+    <path d="M80 87.5 L130 122.5 L117.5 130 L80 103.75 L42.5 130 L30 122.5 Z" fill="#E63946"/>
+    <circle cx="80" cy="21.875" r="4.375" fill="#FFD166"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="192" y="103" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="64" font-weight="700" letter-spacing="-1">
+    <tspan fill="#FF8C42">Forge</tspan><tspan fill="#353B48">Index</tspan>
+  </text>
+</svg>
