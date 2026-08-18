@@ -25,7 +25,7 @@ use crate::config::Config;
 use crate::parser;
 use crate::store::Store;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexSummary {
     pub indexed: usize,
     pub unchanged: usize,
@@ -35,7 +35,19 @@ pub struct IndexSummary {
     pub skipped_excluded_dir: usize,
     pub skipped_filter: usize,
     pub walk_errors: usize,
+    /// Files removed from the index because they no longer exist (or no longer
+    /// pass the filters).
+    #[serde(default)]
+    pub pruned: usize,
+    /// Source files in enabled languages skipped for exceeding max_file_size_kb,
+    /// as "path (N KB)" strings. Surfaced in status output so large files are
+    /// never silently invisible to the index.
+    #[serde(default)]
+    pub too_large_files: Vec<String>,
 }
+
+/// Key under which the last directory-index summary is persisted in the store.
+pub const LAST_SUMMARY_META_KEY: &str = "last_index_summary";
 
 /// Build a GlobSet from exclusion patterns.
 fn build_exclude_set(patterns: &[String]) -> GlobSet {
@@ -80,6 +92,22 @@ fn should_skip_dir(dir_name: &str) -> bool {
     )
 }
 
+/// Why a file was skipped. TooLarge is distinguished so callers can surface
+/// oversized source files instead of hiding them.
+enum SkipReason {
+    TooLarge { size_kb: u64 },
+    Other(String),
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SkipReason::TooLarge { size_kb } => write!(f, "file too large: {} KB", size_kb),
+            SkipReason::Other(s) => write!(f, "{}", s),
+        }
+    }
+}
+
 /// Check why a file should or shouldn't be indexed.
 /// Returns Some(reason) if skipped, None if it should be indexed.
 fn skip_reason(
@@ -87,7 +115,7 @@ fn skip_reason(
     full_path: &Path,
     config: &Config,
     excludes: &GlobSet,
-) -> Option<String> {
+) -> Option<SkipReason> {
     // Check file extension / language support
     let lang = match parser::detect_language(full_path) {
         Some(l) => l,
@@ -96,38 +124,34 @@ fn skip_reason(
                 .extension()
                 .map(|e| e.to_string_lossy().to_string())
                 .unwrap_or_else(|| "none".to_string());
-            return Some(format!("unsupported extension: .{}", ext));
+            return Some(SkipReason::Other(format!("unsupported extension: .{}", ext)));
         }
     };
 
-    // Swift not yet supported at runtime
-    if lang == "swift" {
-        return Some("swift not yet supported".to_string());
-    }
-
     // Check if language is enabled
     if !config.index.languages.contains(&lang) {
-        return Some(format!(
+        return Some(SkipReason::Other(format!(
             "language '{}' not in config languages list {:?}",
             lang, config.index.languages
-        ));
+        )));
     }
 
     // Check file size
     if let Ok(meta) = std::fs::metadata(full_path) {
         if meta.len() > config.index.max_file_size_kb * 1024 {
-            return Some(format!(
-                "file too large: {} KB > {} KB limit",
-                meta.len() / 1024,
-                config.index.max_file_size_kb
-            ));
+            return Some(SkipReason::TooLarge {
+                size_kb: meta.len() / 1024,
+            });
         }
     }
 
     // Check exclusion patterns against RELATIVE path
     let rel_str = rel_path.to_string_lossy().replace('\\', "/");
     if excludes.is_match(&rel_str) {
-        return Some(format!("matched exclude pattern (rel: {})", rel_str));
+        return Some(SkipReason::Other(format!(
+            "matched exclude pattern (rel: {})",
+            rel_str
+        )));
     }
 
     // Skip test files if configured
@@ -148,8 +172,10 @@ fn skip_reason(
             || name.ends_with(".spec.jsx")
             || name.ends_with("_test.go")
             || name.ends_with("_test.rs")
+            || name.ends_with("tests.swift")
+            || name.ends_with("test.swift")
         {
-            return Some(format!("test file: {}", name));
+            return Some(SkipReason::Other(format!("test file: {}", name)));
         }
     }
 
@@ -167,6 +193,8 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<In
     let mut walk_errors = 0;
     let mut total_entries = 0;
     let mut total_files = 0;
+    let mut too_large_files: Vec<String> = Vec::new();
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let walker = WalkDir::new(root).follow_links(false).into_iter();
 
@@ -239,22 +267,47 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<In
         // Check if file should be indexed
         if let Some(reason) = skip_reason(rel_path, path, config, &excludes) {
             verbose!("SKIP_FILTER: {} ({})", rel_path.display(), reason);
+            if let SkipReason::TooLarge { size_kb } = reason {
+                too_large_files.push(format!("{} ({} KB)", rel_path.display(), size_kb));
+            }
             skipped_filter += 1;
             continue;
         }
 
-        match index_file(root, path, store, config) {
-            Ok(true) => {
+        match index_file_unchecked(root, path, store) {
+            Ok(IndexOutcome::Indexed) => {
                 verbose!("INDEXED: {} ", rel_path.display());
+                seen_paths.insert(rel_path.to_string_lossy().replace('\\', "/"));
                 indexed += 1;
             }
-            Ok(false) => {
+            Ok(IndexOutcome::Unchanged) => {
                 verbose!("UNCHANGED: {}", rel_path.display());
+                seen_paths.insert(rel_path.to_string_lossy().replace('\\', "/"));
                 unchanged += 1;
             }
+            Ok(IndexOutcome::Skipped(_)) => unreachable!("filters already applied"),
             Err(e) => {
                 verbose!("INDEX_ERROR: {} ({})", rel_path.display(), e);
+                // Keep errored-but-present files in the index rather than
+                // pruning them below.
+                seen_paths.insert(rel_path.to_string_lossy().replace('\\', "/"));
                 walk_errors += 1;
+            }
+        }
+    }
+
+    // Prune files that no longer exist on disk (or no longer pass the filters)
+    // so deleted files don't leave stale symbols behind forever. Skipped when
+    // the walk had errors — an unreadable subtree must not wipe its files.
+    let mut pruned = 0;
+    if walk_errors == 0 {
+        if let Ok(all_files) = store.get_all_files() {
+            for f in all_files {
+                if !seen_paths.contains(&f.path) {
+                    verbose!("PRUNED: {}", f.path);
+                    let _ = store.delete_file(&f.path);
+                    pruned += 1;
+                }
             }
         }
     }
@@ -273,9 +326,21 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<In
         );
     }
 
+    if !too_large_files.is_empty() {
+        eprintln!(
+            "[forgeindex] WARNING: {} source file(s) skipped for exceeding max_file_size_kb ({} KB):",
+            too_large_files.len(),
+            config.index.max_file_size_kb
+        );
+        for f in &too_large_files {
+            eprintln!("[forgeindex]   {}", f);
+        }
+        eprintln!("[forgeindex]   Raise max_file_size_kb in .forgeindex/config.toml to include them.");
+    }
+
     info!("Indexed {} files", indexed);
 
-    Ok(IndexSummary {
+    let summary = IndexSummary {
         indexed,
         unchanged,
         total_entries,
@@ -284,12 +349,41 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<In
         skipped_excluded_dir,
         skipped_filter,
         walk_errors,
-    })
+        pruned,
+        too_large_files,
+    };
+
+    // Persist so `status` / the index_status MCP tool can report skips later.
+    if let Ok(json) = serde_json::to_string(&summary) {
+        let _ = store.set_meta(LAST_SUMMARY_META_KEY, &json);
+    }
+
+    Ok(summary)
 }
 
-/// Index a single file. Returns true if the file was (re)indexed, false if skipped
-/// due to unchanged content hash.
-pub fn index_file(root: &Path, path: &Path, store: &Store, _config: &Config) -> Result<bool> {
+/// Outcome of indexing a single file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexOutcome {
+    Indexed,
+    Unchanged,
+    /// Skipped with the reason (excluded, wrong language, too large, …).
+    Skipped(String),
+}
+
+/// Index a single file, applying the same config filters as a directory walk
+/// (exclude patterns, language list, size cap, test-file filter).
+pub fn index_file(root: &Path, path: &Path, store: &Store, config: &Config) -> Result<IndexOutcome> {
+    let excludes = build_exclude_set(&config.index.exclude_patterns);
+    let rel_path = path.strip_prefix(root).unwrap_or(path);
+    if let Some(reason) = skip_reason(rel_path, path, config, &excludes) {
+        return Ok(IndexOutcome::Skipped(reason.to_string()));
+    }
+    index_file_unchecked(root, path, store)
+}
+
+/// Index a single file without re-applying config filters (the directory walk
+/// has already applied them).
+fn index_file_unchecked(root: &Path, path: &Path, store: &Store) -> Result<IndexOutcome> {
     let source = std::fs::read_to_string(path)?;
     let hash = xxh3_64(source.as_bytes());
 
@@ -304,7 +398,7 @@ pub fn index_file(root: &Path, path: &Path, store: &Store, _config: &Config) -> 
     if let Ok(Some(stored_hash)) = store.get_file_hash(&rel_path) {
         if stored_hash == hash.to_string() {
             verbose!("Unchanged: {}", rel_path);
-            return Ok(false);
+            return Ok(IndexOutcome::Unchanged);
         }
     }
 
@@ -319,5 +413,5 @@ pub fn index_file(root: &Path, path: &Path, store: &Store, _config: &Config) -> 
     store.upsert_parsed_file(&parsed)?;
     verbose!("Indexed: {} ({} symbols)", rel_path, parsed.symbols.len());
 
-    Ok(true)
+    Ok(IndexOutcome::Indexed)
 }

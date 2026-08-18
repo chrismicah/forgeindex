@@ -471,9 +471,11 @@ fn test_full_pipeline() {
     let py_summary = indexer::index_directory(&py_root, &store, &config).unwrap();
     assert!(py_summary.indexed > 0);
 
-    // 2. Index TypeScript project
+    // 2. Index TypeScript project into its own store (a store maps to one
+    // root; indexing a different root prunes files outside it)
+    let (_ts_dir, ts_store) = temp_store();
     let ts_root = fixture_path("typescript_project");
-    let ts_summary = indexer::index_directory(&ts_root, &store, &config).unwrap();
+    let ts_summary = indexer::index_directory(&ts_root, &ts_store, &config).unwrap();
     assert!(ts_summary.indexed > 0);
 
     // 3. Query symbols
@@ -513,4 +515,88 @@ fn test_full_pipeline() {
     // 9. Pack repo
     let packed = compressor::pack_repo(&all_symbols, 4000, "xml");
     assert!(packed.contains("<repo>"));
+}
+
+// ─── Incremental reindex integrity ──────────────────────────────────
+
+/// Re-indexing one file must not destroy cross-file edges that target it,
+/// and deleted files must be pruned from the index.
+#[test]
+fn test_incremental_reindex_preserves_edges_and_prunes() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("a.py"), "def target():\n    pass\n").unwrap();
+    std::fs::write(
+        root.join("b.py"),
+        "from a import target\n\ndef caller():\n    target()\n",
+    )
+    .unwrap();
+
+    let store = Store::open(&root.join(".forgeindex").join("index.db")).unwrap();
+    let config = Config::default();
+    indexer::index_directory(root, &store, &config).unwrap();
+
+    let edge_names = |store: &Store| -> Vec<(String, String)> {
+        let syms = store.get_all_symbols().unwrap();
+        let name_of = |id: i64| {
+            syms.iter()
+                .find(|s| s.id == id)
+                .map(|s| s.name.clone())
+                .unwrap_or_default()
+        };
+        store
+            .get_all_edges()
+            .unwrap()
+            .iter()
+            .map(|e| (name_of(e.source_symbol_id), name_of(e.target_symbol_id)))
+            .collect()
+    };
+
+    assert!(
+        edge_names(&store).contains(&("caller".into(), "target".into())),
+        "expected caller→target edge after initial index: {:?}",
+        edge_names(&store)
+    );
+
+    // Modify a.py (the TARGET file) and re-index the directory. Before the
+    // inbound-edge rebuild fix, the caller→target edge was cascade-deleted
+    // and never recreated because b.py is hash-unchanged.
+    std::fs::write(root.join("a.py"), "def target():\n    return 1\n").unwrap();
+    let summary = indexer::index_directory(root, &store, &config).unwrap();
+    assert_eq!(summary.indexed, 1);
+    assert_eq!(summary.unchanged, 1);
+    assert!(
+        edge_names(&store).contains(&("caller".into(), "target".into())),
+        "caller→target edge lost after incremental reindex: {:?}",
+        edge_names(&store)
+    );
+
+    // Delete b.py: the next walk must prune it from the index.
+    std::fs::remove_file(root.join("b.py")).unwrap();
+    let summary = indexer::index_directory(root, &store, &config).unwrap();
+    assert_eq!(summary.pruned, 1);
+    let files = store.get_all_files().unwrap();
+    assert!(
+        files.iter().all(|f| f.path != "b.py"),
+        "b.py should be pruned: {:?}",
+        files.iter().map(|f| &f.path).collect::<Vec<_>>()
+    );
+}
+
+/// Single-file indexing must honor config filters (language, excludes, size).
+#[test]
+fn test_index_file_applies_filters() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("big.py"), "x = 1\n".repeat(1)).unwrap();
+    let store = Store::open(&root.join(".forgeindex").join("index.db")).unwrap();
+    let mut config = Config::default();
+    config.index.languages = vec!["rust".into()]; // python disabled
+
+    match indexer::index_file(root, &root.join("big.py"), &store, &config).unwrap() {
+        indexer::IndexOutcome::Skipped(reason) => {
+            assert!(reason.contains("language"), "reason: {reason}")
+        }
+        other => panic!("expected Skipped, got {:?}", other),
+    }
 }

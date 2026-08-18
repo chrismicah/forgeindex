@@ -78,6 +78,10 @@ impl Store {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        // The git-hook reindex runs in the background while the MCP server may
+        // be writing; without a busy timeout concurrent writers fail instantly
+        // with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let store = Store { conn };
         store.create_tables()?;
@@ -116,6 +120,7 @@ impl Store {
                 file_id INTEGER NOT NULL,
                 raw_text TEXT NOT NULL,
                 source_module TEXT,
+                imported_names TEXT NOT NULL DEFAULT '[]',
                 FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
             );
 
@@ -137,6 +142,11 @@ impl Store {
                 FOREIGN KEY (target_symbol_id) REFERENCES symbols(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
             CREATE INDEX IF NOT EXISTS idx_symbols_file_id ON symbols(file_id);
             CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
@@ -151,6 +161,30 @@ impl Store {
             ",
         )?;
         self.ensure_symbol_qualified_names()?;
+        self.ensure_imports_imported_names()?;
+        Ok(())
+    }
+
+    /// Migrate pre-existing databases to carry imported names on the imports
+    /// table (needed to re-resolve inbound edges on incremental reindex).
+    fn ensure_imports_imported_names(&self) -> Result<()> {
+        let has_column = {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(imports)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            let mut has = false;
+            for row in rows {
+                if row? == "imported_names" {
+                    has = true;
+                    break;
+                }
+            }
+            has
+        };
+        if !has_column {
+            self.conn.execute_batch(
+                "ALTER TABLE imports ADD COLUMN imported_names TEXT NOT NULL DEFAULT '[]';",
+            )?;
+        }
         Ok(())
     }
 
@@ -271,9 +305,12 @@ impl Store {
 
         // Insert imports
         for imp in &parsed.imports {
+            let names_json =
+                serde_json::to_string(&imp.imported_names).unwrap_or_else(|_| "[]".into());
             tx.execute(
-                "INSERT INTO imports (file_id, raw_text, source_module) VALUES (?1, ?2, ?3)",
-                params![file_id, &imp.raw_text, &imp.source_module],
+                "INSERT INTO imports (file_id, raw_text, source_module, imported_names)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![file_id, &imp.raw_text, &imp.source_module, names_json],
             )?;
         }
 
@@ -288,6 +325,12 @@ impl Store {
             &parsed.imports,
             &parsed.references,
         )?;
+
+        // Deleting the old file rows above cascaded away every edge that
+        // TARGETED this file's symbols from other files. Rebuild them from the
+        // persisted references of those files, or the graph erodes on every
+        // incremental reindex.
+        rebuild_inbound_edges(&tx, &parsed.path, &inserted_symbols)?;
 
         tx.commit()?;
         Ok(())
@@ -546,6 +589,21 @@ impl Store {
             edge_count,
             languages,
         })
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT value FROM meta WHERE key = ?1")?;
+        let mut rows = stmt.query_map(params![key], |r| r.get::<_, String>(0))?;
+        Ok(rows.next().transpose()?)
     }
 
     pub fn delete_file(&self, path: &str) -> Result<()> {
@@ -809,6 +867,91 @@ fn insert_reference_edges(
     Ok(())
 }
 
+/// Re-resolve edges from OTHER files whose stored references name one of this
+/// file's freshly inserted symbols. Their previous edges to this file were
+/// destroyed by the ON DELETE CASCADE when the file's old rows were removed.
+fn rebuild_inbound_edges(
+    conn: &Connection,
+    file_path: &str,
+    inserted_symbols: &[InsertedSymbolRecord],
+) -> Result<()> {
+    let names: std::collections::HashSet<&str> = inserted_symbols
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+
+    // Files (other than this one) holding references to any of those names.
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT f.id, f.path
+         FROM symbol_references r JOIN files f ON r.file_id = f.id
+         WHERE f.path != ?1 AND r.symbol_name IN (SELECT s.name FROM symbols s
+             JOIN files fs ON s.file_id = fs.id WHERE fs.path = ?1)",
+    )?;
+    let referencing_files: Vec<(i64, String)> = stmt
+        .query_map(params![file_path], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    for (ref_file_id, ref_file_path) in referencing_files {
+        // Load that file's symbols, imports, and only the relevant references.
+        let mut sym_stmt = conn.prepare(
+            "SELECT id, name, byte_start, byte_end FROM symbols WHERE file_id = ?1",
+        )?;
+        let symbols: Vec<InsertedSymbolRecord> = sym_stmt
+            .query_map(params![ref_file_id], |row| {
+                Ok(InsertedSymbolRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    byte_start: row.get::<_, i64>(2)? as usize,
+                    byte_end: row.get::<_, i64>(3)? as usize,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut imp_stmt = conn.prepare(
+            "SELECT raw_text, source_module, imported_names FROM imports WHERE file_id = ?1",
+        )?;
+        let imports: Vec<Import> = imp_stmt
+            .query_map(params![ref_file_id], |row| {
+                let names_json: String = row.get(2)?;
+                Ok(Import {
+                    raw_text: row.get(0)?,
+                    source_module: row.get(1)?,
+                    imported_names: serde_json::from_str(&names_json).unwrap_or_default(),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut ref_stmt = conn.prepare(
+            "SELECT symbol_name, byte_start, byte_end, context
+             FROM symbol_references WHERE file_id = ?1",
+        )?;
+        let references: Vec<Reference> = ref_stmt
+            .query_map(params![ref_file_id], |row| {
+                Ok(Reference {
+                    name: row.get(0)?,
+                    byte_start: row.get::<_, i64>(1)? as usize,
+                    byte_end: row.get::<_, i64>(2)? as usize,
+                    context: row.get(3)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .filter(|r| names.contains(r.name.as_str()))
+            .collect();
+
+        insert_reference_edges(conn, &ref_file_path, &symbols, &imports, &references)?;
+    }
+
+    Ok(())
+}
+
 fn containing_symbol_id(byte_offset: usize, symbols: &[InsertedSymbolRecord]) -> Option<i64> {
     symbols
         .iter()
@@ -925,7 +1068,7 @@ fn normalize_file_path(path: &str) -> String {
     let mut normalized = path.replace('\\', "/");
     for suffix in [
         ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs", ".go", ".java", ".c", ".cpp",
-        ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".rb",
+        ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".rb", ".swift",
     ] {
         if normalized.ends_with(suffix) {
             normalized.truncate(normalized.len() - suffix.len());

@@ -14,6 +14,8 @@ pub enum SymbolKind {
     Const,
     Interface,
     Module,
+    /// Mutable or computed property (Swift `var`, incl. SwiftUI `body`).
+    Property,
 }
 
 impl std::fmt::Display for SymbolKind {
@@ -26,6 +28,7 @@ impl std::fmt::Display for SymbolKind {
             SymbolKind::Const => write!(f, "const"),
             SymbolKind::Interface => write!(f, "interface"),
             SymbolKind::Module => write!(f, "module"),
+            SymbolKind::Property => write!(f, "property"),
         }
     }
 }
@@ -130,6 +133,7 @@ pub fn get_language(name: &str) -> Option<Language> {
         "c" => Some(tree_sitter_c::LANGUAGE.into()),
         "cpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
         "ruby" => Some(tree_sitter_ruby::LANGUAGE.into()),
+        "swift" => Some(tree_sitter_swift::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -137,11 +141,6 @@ pub fn get_language(name: &str) -> Option<Language> {
 pub fn parse_file(path: &Path, source: &str) -> Result<ParsedFile> {
     let lang_name = detect_language(path)
         .ok_or_else(|| anyhow!("Unsupported file type: {}", path.display()))?;
-
-    // Swift not supported yet at runtime (no grammar crate)
-    if lang_name == "swift" {
-        return Err(anyhow!("Swift parsing not yet supported"));
-    }
 
     let language = get_language(&lang_name)
         .ok_or_else(|| anyhow!("No grammar for language: {}", lang_name))?;
@@ -204,6 +203,17 @@ fn extract_symbols(root: Node, source: &[u8], lang: &str) -> Vec<Symbol> {
 }
 
 fn extract_node_symbols(node: Node, source: &[u8], lang: &str, out: &mut Vec<Symbol>) {
+    // Error recovery: a construct the grammar doesn't know can shatter the
+    // parse, leaving well-formed declaration nodes strewn inside ERROR
+    // subtrees. Descend into ERROR nodes so one bad expression doesn't erase
+    // every symbol after it in the file.
+    if node.kind() == "ERROR" {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            extract_node_symbols(child, source, lang, out);
+        }
+        return;
+    }
     match lang {
         "python" => extract_python_node(node, source, out),
         "typescript" | "tsx" => extract_ts_node(node, source, out, true),
@@ -214,6 +224,7 @@ fn extract_node_symbols(node: Node, source: &[u8], lang: &str, out: &mut Vec<Sym
         "c" => extract_c_node(node, source, out),
         "cpp" => extract_cpp_node(node, source, out),
         "ruby" => extract_ruby_node(node, source, out),
+        "swift" => extract_swift_node(node, source, out),
         _ => {}
     }
 }
@@ -1216,6 +1227,365 @@ fn extract_ruby_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
     }
 }
 
+// ─── Swift ───────────────────────────────────────────────────────────
+//
+// Grammar: alex-pinkus tree-sitter-swift (ABI 14, crate 0.6.0). Notable shapes:
+//  • class/struct/enum/actor/extension all parse as `class_declaration`,
+//    discriminated by the `declaration_kind` field. `protocol` is its own node.
+//  • function `name` field is the first `simple_identifier`; init/deinit name
+//    fields are the keyword nodes. Property names live under `pattern`.
+//  • Visibility lives in an optional `modifiers` child (default: internal).
+
+/// Visibility from a declaration's optional `modifiers` child only (never body text).
+fn swift_visibility(node: Node, source: &[u8]) -> Visibility {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "modifiers" {
+            let text = node_text(child, source);
+            if text.contains("public") || text.contains("open") {
+                return Visibility::Public;
+            }
+            if text.contains("private") || text.contains("fileprivate") {
+                return Visibility::Private;
+            }
+            break;
+        }
+    }
+    Visibility::Internal
+}
+
+/// Pull the bound identifier out of a `pattern` node (handles `let foo`, `var foo`).
+fn swift_pattern_name(node: Node, source: &[u8]) -> Option<String> {
+    if let Some(bi) = node.child_by_field_name("bound_identifier") {
+        return Some(node_text(bi, source).to_string());
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "simple_identifier" {
+            return Some(node_text(child, source).to_string());
+        }
+        if let Some(n) = swift_pattern_name(child, source) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn swift_first_line(node: Node, source: &[u8]) -> String {
+    node_text(node, source)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn swift_function_symbol(node: Node, source: &[u8], kind: SymbolKind) -> Option<Symbol> {
+    // Subscripts and deinit have no `name` field — synthesize one.
+    let name = match node.kind() {
+        "subscript_declaration" => "subscript".to_string(),
+        "deinit_declaration" => "deinit".to_string(),
+        _ => {
+            let name_node = node.child_by_field_name("name")?;
+            node_text(name_node, source).trim().to_string()
+        }
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some(Symbol {
+        name,
+        kind,
+        visibility: swift_visibility(node, source),
+        signature: signature_up_to_body(node, source),
+        docstring: None,
+        byte_start: node.start_byte(),
+        byte_end: node.end_byte(),
+        children: vec![],
+    })
+}
+
+/// True when a property declaration is a `var` binding (mutable/computed —
+/// includes SwiftUI `body` and wrapped state), as opposed to a `let` constant.
+fn swift_is_var_binding(node: Node, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    if node
+        .children(&mut cursor)
+        .any(|c| c.kind() == "var" || (c.kind() == "value_binding_pattern" && node_text(c, source).starts_with("var")))
+    {
+        return true;
+    }
+    // Fallback: token scan of the declaration head (before any `=`/`{`).
+    let head = swift_first_line(node, source);
+    head.split(['=', '{'])
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .any(|t| t == "var")
+}
+
+/// Emit one symbol per bound name (`var` → Property, `let` → Const). A single
+/// `property_declaration` can carry several bindings (`let a = 1, b = 2`),
+/// each as its own `pattern` child.
+fn swift_push_properties(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
+    let vis = swift_visibility(node, source);
+    let sig = swift_first_line(node, source);
+    let kind = if swift_is_var_binding(node, source) {
+        SymbolKind::Property
+    } else {
+        SymbolKind::Const
+    };
+    let mut pushed = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() != "pattern" {
+            continue;
+        }
+        if let Some(name) = swift_pattern_name(child, source) {
+            if !name.is_empty() {
+                pushed = true;
+                out.push(Symbol {
+                    name,
+                    kind: kind.clone(),
+                    visibility: vis,
+                    signature: sig.clone(),
+                    docstring: None,
+                    byte_start: node.start_byte(),
+                    byte_end: node.end_byte(),
+                    children: vec![],
+                });
+            }
+        }
+    }
+    // Fallback for shapes where the binding isn't a direct `pattern` child.
+    if !pushed {
+        if let Some(nf) = node.child_by_field_name("name") {
+            let name = swift_pattern_name(nf, source)
+                .unwrap_or_else(|| node_text(nf, source).trim().to_string());
+            if !name.is_empty() {
+                out.push(Symbol {
+                    name,
+                    kind,
+                    visibility: vis,
+                    signature: sig,
+                    docstring: None,
+                    byte_start: node.start_byte(),
+                    byte_end: node.end_byte(),
+                    children: vec![],
+                });
+            }
+        }
+    }
+}
+
+fn swift_simple_symbol(
+    node: Node,
+    source: &[u8],
+    name: String,
+    kind: SymbolKind,
+) -> Option<Symbol> {
+    if name.is_empty() {
+        return None;
+    }
+    Some(Symbol {
+        name,
+        kind,
+        visibility: swift_visibility(node, source),
+        signature: swift_first_line(node, source),
+        docstring: None,
+        byte_start: node.start_byte(),
+        byte_end: node.end_byte(),
+        children: vec![],
+    })
+}
+
+/// First descendant of the given kind (shallow search across direct children, then deeper).
+fn swift_first_child_text(node: Node, source: &[u8], kind: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == kind {
+            return Some(node_text(child, source).trim().to_string());
+        }
+    }
+    None
+}
+
+fn swift_declaration_kind(node: Node, source: &[u8]) -> String {
+    node.child_by_field_name("declaration_kind")
+        .map(|n| node_text(n, source).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Map a type-defining `class_declaration`/`protocol_declaration` to a SymbolKind.
+fn swift_type_kind(decl_kind: &str) -> SymbolKind {
+    match decl_kind {
+        "protocol" => SymbolKind::Interface,
+        "enum" => SymbolKind::Type,
+        // class, struct, actor — value/reference types that carry member bodies.
+        _ => SymbolKind::Class,
+    }
+}
+
+/// Build a fully-formed Symbol for a nominal type, recursively populating members.
+fn swift_build_type(node: Node, source: &[u8]) -> Option<Symbol> {
+    let name_node = node.child_by_field_name("name")?;
+    let name = node_text(name_node, source).trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let decl_kind = swift_declaration_kind(node, source);
+    let mut children = Vec::new();
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for member in body.children(&mut cursor) {
+            swift_member(member, source, &mut children);
+        }
+    }
+    Some(Symbol {
+        name,
+        kind: swift_type_kind(&decl_kind),
+        visibility: swift_visibility(node, source),
+        signature: signature_up_to_body(node, source),
+        docstring: None,
+        byte_start: node.start_byte(),
+        byte_end: node.end_byte(),
+        children,
+    })
+}
+
+/// Flatten an `extension` body into top-level `Type.method` symbols (mirrors Rust impl handling).
+fn swift_flatten_extension(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
+    let type_name = node
+        .child_by_field_name("name")
+        .map(|n| node_text(n, source).trim().to_string())
+        .unwrap_or_default();
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for member in body.children(&mut cursor) {
+            let mut tmp = Vec::new();
+            swift_member(member, source, &mut tmp);
+            for mut sym in tmp {
+                // Prefix every member — methods, properties, and nested types
+                // alike — so extension members stay attached to their type
+                // (SwiftUI code keeps most computed vars and nested enums in
+                // extensions).
+                if !type_name.is_empty() {
+                    sym.name = format!("{}.{}", type_name, sym.name);
+                }
+                out.push(sym);
+            }
+        }
+    }
+}
+
+/// Extract a single member of a type body (method, property, case, nested type, …).
+fn swift_member(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
+    match node.kind() {
+        "function_declaration" | "protocol_function_declaration" => {
+            if let Some(s) = swift_function_symbol(node, source, SymbolKind::Method) {
+                out.push(s);
+            }
+        }
+        "init_declaration" | "deinit_declaration" | "subscript_declaration" => {
+            if let Some(s) = swift_function_symbol(node, source, SymbolKind::Method) {
+                out.push(s);
+            }
+        }
+        "property_declaration" | "protocol_property_declaration" => {
+            swift_push_properties(node, source, out);
+        }
+        "enum_entry" => {
+            // `case up, down` → one Const per case name.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "simple_identifier" {
+                    let name = node_text(child, source).to_string();
+                    if let Some(s) = swift_simple_symbol(node, source, name, SymbolKind::Const) {
+                        out.push(s);
+                    }
+                }
+            }
+        }
+        "associatedtype_declaration" => {
+            if let Some(name) = swift_first_child_text(node, source, "type_identifier") {
+                if let Some(s) = swift_simple_symbol(node, source, name, SymbolKind::Type) {
+                    out.push(s);
+                }
+            }
+        }
+        "typealias_declaration" => {
+            if let Some(name) = swift_first_child_text(node, source, "type_identifier") {
+                if let Some(s) = swift_simple_symbol(node, source, name, SymbolKind::Type) {
+                    out.push(s);
+                }
+            }
+        }
+        "class_declaration" => {
+            if swift_declaration_kind(node, source) == "extension" {
+                swift_flatten_extension(node, source, out);
+            } else if let Some(s) = swift_build_type(node, source) {
+                out.push(s);
+            }
+        }
+        "protocol_declaration" => {
+            if let Some(s) = swift_build_type(node, source) {
+                out.push(s);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_swift_node(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
+    match node.kind() {
+        "function_declaration" => {
+            if let Some(s) = swift_function_symbol(node, source, SymbolKind::Function) {
+                out.push(s);
+            }
+        }
+        "property_declaration" => {
+            swift_push_properties(node, source, out);
+        }
+        "typealias_declaration" => {
+            if let Some(name) = swift_first_child_text(node, source, "type_identifier") {
+                if let Some(s) = swift_simple_symbol(node, source, name, SymbolKind::Type) {
+                    out.push(s);
+                }
+            }
+        }
+        "operator_declaration" => {
+            if let Some(name) = swift_first_child_text(node, source, "custom_operator") {
+                if let Some(s) = swift_simple_symbol(node, source, name, SymbolKind::Function) {
+                    out.push(s);
+                }
+            }
+        }
+        "protocol_declaration" => {
+            if let Some(s) = swift_build_type(node, source) {
+                out.push(s);
+            }
+        }
+        "class_declaration" => {
+            if swift_declaration_kind(node, source) == "extension" {
+                swift_flatten_extension(node, source, out);
+            } else if let Some(s) = swift_build_type(node, source) {
+                out.push(s);
+            }
+        }
+        _ => {
+            // Recovery path: only descend into unhandled nodes when the
+            // subtree contains parse errors — well-formed files are untouched,
+            // but declarations buried in a broken region are still found.
+            if node.has_error() {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    extract_swift_node(child, source, out);
+                }
+            }
+        }
+    }
+}
+
 // ─── Import extraction ──────────────────────────────────────────────
 
 fn extract_imports(root: Node, source: &[u8], lang: &str) -> Vec<Import> {
@@ -1366,6 +1736,24 @@ fn extract_imports(root: Node, source: &[u8], lang: &str) -> Vec<Import> {
                     imported_names: path.into_iter().collect(),
                 });
             }
+            // Swift
+            ("swift", "import_declaration") => {
+                let text = node_text(child, source).to_string();
+                // The module path is the `identifier` child (dotted, e.g. `A.B`).
+                let mut module = None;
+                let mut ic = child.walk();
+                for c in child.children(&mut ic) {
+                    if c.kind() == "identifier" {
+                        module = Some(node_text(c, source).trim().to_string());
+                    }
+                }
+                let names = module.clone().into_iter().collect();
+                imports.push(Import {
+                    raw_text: text,
+                    source_module: module,
+                    imported_names: names,
+                });
+            }
             // Ruby
             ("ruby", "call") => {
                 let text = node_text(child, source);
@@ -1440,6 +1828,7 @@ fn is_call_node(lang: &str, kind: &str) -> bool {
         }
         "java" => kind == "method_invocation" || kind == "object_creation_expression",
         "ruby" => kind == "call",
+        "swift" => kind == "call_expression",
         _ => false,
     }
 }
@@ -1455,15 +1844,17 @@ fn call_target_node<'a>(node: Node<'a>, lang: &str) -> Option<Node<'a>> {
         "ruby" => node
             .child_by_field_name("method")
             .or_else(|| node.child_by_field_name("name")),
+        // Swift `call_expression`'s callee is its first child (a `simple_identifier`
+        // for free calls, or a `navigation_expression` for method/static calls).
+        "swift" => node.child(0),
         _ => None,
     }
 }
 
 fn extract_reference_name(node: Node, source: &[u8]) -> Option<String> {
     match node.kind() {
-        "identifier" | "type_identifier" | "field_identifier" | "property_identifier" => {
-            sanitize_reference_name(node_text(node, source))
-        }
+        "identifier" | "type_identifier" | "field_identifier" | "property_identifier"
+        | "simple_identifier" => sanitize_reference_name(node_text(node, source)),
         _ => {
             let mut result = None;
             let mut cursor = node.walk();
@@ -1509,7 +1900,7 @@ pub fn symbol_source<'a>(sym: &Symbol, source: &'a str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_file;
+    use super::{flatten_symbols, parse_file, SymbolKind, Visibility};
     use std::path::Path;
 
     #[test]
@@ -1532,5 +1923,268 @@ def caller():
         assert!(names.contains(&"helper"));
         assert!(names.contains(&"target"));
         assert!(parsed.references.iter().all(|r| r.context == "call"));
+    }
+
+    #[test]
+    fn extracts_swift_symbols_imports_and_references() {
+        let parsed = parse_file(
+            Path::new("Sample.swift"),
+            r#"
+import Foundation
+@testable import STVADomain
+
+public func freeFunction() -> Bool { helper() }
+func helper() {}
+
+public struct MyStruct {
+    let id: Int
+    public func method() -> Int { return id }
+}
+
+class MyClass {
+    init() {}
+    private func secret() {}
+}
+
+enum Direction { case up, down }
+
+protocol Drawable {
+    func draw()
+    var area: Double { get }
+}
+
+extension MyStruct: Drawable {
+    func draw() { method() }
+}
+
+typealias Handler = (Int) -> Void
+"#,
+        )
+        .expect("swift should parse");
+
+        // Top-level symbols
+        let top: Vec<_> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(top.contains(&"freeFunction"), "missing freeFunction: {top:?}");
+        assert!(top.contains(&"MyStruct"), "missing MyStruct: {top:?}");
+        assert!(top.contains(&"MyClass"));
+        assert!(top.contains(&"Direction"));
+        assert!(top.contains(&"Drawable"));
+        assert!(top.contains(&"Handler"));
+        // Extension methods are flattened to `Type.method`
+        assert!(top.contains(&"MyStruct.draw"), "missing extension method: {top:?}");
+
+        // Kinds
+        let struct_sym = parsed.symbols.iter().find(|s| s.name == "MyStruct").unwrap();
+        assert_eq!(struct_sym.kind, SymbolKind::Class);
+        assert_eq!(struct_sym.visibility, Visibility::Public);
+        let proto = parsed.symbols.iter().find(|s| s.name == "Drawable").unwrap();
+        assert_eq!(proto.kind, SymbolKind::Interface);
+
+        // Members nested under their type
+        let method_names: Vec<_> = struct_sym.children.iter().map(|c| c.name.as_str()).collect();
+        assert!(method_names.contains(&"method"), "members: {method_names:?}");
+        assert!(method_names.contains(&"id"));
+
+        // Enum cases
+        let dir = parsed.symbols.iter().find(|s| s.name == "Direction").unwrap();
+        let cases: Vec<_> = dir.children.iter().map(|c| c.name.as_str()).collect();
+        assert!(cases.contains(&"up") && cases.contains(&"down"), "cases: {cases:?}");
+
+        // Imports
+        let modules: Vec<_> = parsed
+            .imports
+            .iter()
+            .filter_map(|i| i.source_module.as_deref())
+            .collect();
+        assert!(modules.contains(&"Foundation"), "imports: {modules:?}");
+        assert!(modules.contains(&"STVADomain"));
+
+        // References (calls)
+        let refs: Vec<_> = parsed.references.iter().map(|r| r.name.as_str()).collect();
+        assert!(refs.contains(&"helper"), "refs: {refs:?}");
+        assert!(refs.contains(&"method"));
+    }
+
+    #[test]
+    fn swift_deinit_extension_members_and_property_kinds() {
+        let parsed = parse_file(
+            Path::new("View.swift"),
+            r#"
+import SwiftUI
+
+struct ContentView: View {
+    @State private var counter = 0
+    let fixed = 42
+    var body: some View { Text("hi") }
+}
+
+actor Cache {
+    init() {}
+    deinit {}
+}
+
+extension ContentView {
+    enum Route { case home, detail }
+    var title: String { "t" }
+    static func preview() -> ContentView { ContentView() }
+}
+"#,
+        )
+        .expect("swift should parse");
+
+        let flat = flatten_symbols(&parsed.symbols);
+        let names: Vec<_> = flat.iter().map(|s| s.name.as_str()).collect();
+
+        // deinit is captured
+        assert!(names.contains(&"deinit"), "missing deinit: {names:?}");
+
+        // ALL extension members keep their type prefix, not just methods
+        let top: Vec<_> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(top.contains(&"ContentView.Route"), "top: {top:?}");
+        assert!(top.contains(&"ContentView.title"), "top: {top:?}");
+        assert!(top.contains(&"ContentView.preview"), "top: {top:?}");
+
+        // var → Property (incl. wrapped state and computed body), let → Const
+        let view = parsed.symbols.iter().find(|s| s.name == "ContentView").unwrap();
+        let counter = view.children.iter().find(|c| c.name == "counter").unwrap();
+        assert_eq!(counter.kind, SymbolKind::Property, "wrapped var is a property");
+        let body = view.children.iter().find(|c| c.name == "body").unwrap();
+        assert_eq!(body.kind, SymbolKind::Property, "computed var is a property");
+        let fixed = view.children.iter().find(|c| c.name == "fixed").unwrap();
+        assert_eq!(fixed.kind, SymbolKind::Const, "let stays const");
+        let title = parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "ContentView.title")
+            .unwrap();
+        assert_eq!(title.kind, SymbolKind::Property);
+    }
+
+    #[test]
+    fn swift_recovers_symbols_after_parse_errors() {
+        // The `@#$%` garbage guarantees a parse error mid-file; declarations
+        // after it must still be extracted via ERROR-node recovery.
+        let parsed = parse_file(
+            Path::new("Broken.swift"),
+            r#"
+class BeforeError {
+    func early() {}
+}
+
+let x = @#$%^&*
+
+class AfterError {
+    deinit {}
+    func late() {}
+}
+"#,
+        )
+        .expect("swift should parse even with errors");
+
+        let flat = flatten_symbols(&parsed.symbols);
+        let names: Vec<_> = flat.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"BeforeError"), "names: {names:?}");
+        assert!(
+            names.contains(&"AfterError"),
+            "symbols after a parse error were lost: {names:?}"
+        );
+        assert!(names.contains(&"late"), "names: {names:?}");
+    }
+
+    #[test]
+    fn swift_handles_unicode_generics_nesting_and_operators() {
+        let parsed = parse_file(
+            Path::new("Adv.swift"),
+            r#"
+import struct SwiftUI.Color
+
+func café(naïve: Int) -> Bool { return true }
+let π = 3.14159
+
+public func transform<T, U>(
+    _ input: [T],
+    using mapper: (T) -> U
+) -> [U] where T: Equatable {
+    return input.map(mapper)
+}
+
+infix operator <=>: ComparisonPrecedence
+
+enum Outer {
+    struct Middle {
+        class Inner { func deep() {} }
+    }
+}
+
+@MainActor
+final class VM {
+    @Published private(set) var count = 0
+}
+"#,
+        )
+        .expect("adversarial swift parses");
+
+        let flat = flatten_symbols(&parsed.symbols);
+        let names: Vec<_> = flat.iter().map(|s| s.name.as_str()).collect();
+
+        // Unicode identifiers survive with valid byte offsets.
+        assert!(names.contains(&"café"));
+        assert!(names.contains(&"π"));
+        for s in &flat {
+            assert!(parsed_offsets_valid(s), "bad offsets for {}", s.name);
+        }
+
+        // Generic function keeps its bare name despite <T, U> and multi-line where clause.
+        let t = parsed.symbols.iter().find(|s| s.name == "transform").unwrap();
+        assert_eq!(t.visibility, Visibility::Public);
+
+        // Operator declaration captured.
+        assert!(names.contains(&"<=>"));
+
+        // 3-level nesting: Outer > Middle > Inner > deep.
+        let outer = parsed.symbols.iter().find(|s| s.name == "Outer").unwrap();
+        let middle = outer.children.iter().find(|s| s.name == "Middle").unwrap();
+        let inner = middle.children.iter().find(|s| s.name == "Inner").unwrap();
+        assert!(inner.children.iter().any(|s| s.name == "deep"));
+
+        // `private(set)` modifier resolves to private visibility.
+        let vm = parsed.symbols.iter().find(|s| s.name == "VM").unwrap();
+        let count = vm.children.iter().find(|s| s.name == "count").unwrap();
+        assert_eq!(count.visibility, Visibility::Private);
+
+        // `import struct SwiftUI.Color` resolves the dotted module.
+        assert!(parsed
+            .imports
+            .iter()
+            .any(|i| i.source_module.as_deref() == Some("SwiftUI.Color")));
+    }
+
+    fn parsed_offsets_valid(s: &super::Symbol) -> bool {
+        s.byte_start <= s.byte_end
+    }
+
+    #[test]
+    fn swift_emits_one_symbol_per_binding() {
+        let parsed = parse_file(
+            Path::new("Bind.swift"),
+            "let a = 1, b = 2\nvar p: Int, q: String\n",
+        )
+        .expect("swift parses");
+        let names: Vec<_> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"a") && names.contains(&"b"), "got {names:?}");
+        assert!(names.contains(&"p") && names.contains(&"q"), "got {names:?}");
+    }
+
+    #[test]
+    fn swift_empty_and_malformed_do_not_panic() {
+        // Empty file
+        let empty = parse_file(Path::new("Empty.swift"), "").expect("empty swift parses");
+        assert!(empty.symbols.is_empty());
+        // Truncated / malformed source must not panic
+        let broken = parse_file(
+            Path::new("Broken.swift"),
+            "func foo( {\n  let x =\nstruct {",
+        );
+        assert!(broken.is_ok(), "malformed swift should degrade, not error");
     }
 }
