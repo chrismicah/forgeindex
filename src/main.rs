@@ -165,7 +165,16 @@ fn cmd_register() -> Result<()> {
         .args(["mcp", "remove", "--scope", "user", "forgeindex"])
         .output();
     let out = std::process::Command::new(&claude)
-        .args(["mcp", "add", "--scope", "user", "forgeindex", "--", &exe_str, "serve"])
+        .args([
+            "mcp",
+            "add",
+            "--scope",
+            "user",
+            "forgeindex",
+            "--",
+            &exe_str,
+            "serve",
+        ])
         .output()?;
 
     if out.status.success() {
@@ -232,7 +241,10 @@ fn cmd_doctor(root: &Path) -> Result<()> {
                     if Path::new(cmd).is_absolute() {
                         println!("Registered:  ✓ user scope, absolute path ({})", cmd);
                     } else {
-                        println!("Registered:  ⚠ command is \"{}\" (not an absolute path)", cmd);
+                        println!(
+                            "Registered:  ⚠ command is \"{}\" (not an absolute path)",
+                            cmd
+                        );
                         println!("             GUI-launched apps may fail to spawn it.");
                         println!("             Fix: forgeindex register");
                     }
@@ -259,7 +271,10 @@ fn cmd_doctor(root: &Path) -> Result<()> {
             db_path.display()
         );
     } else {
-        println!("Index:       none yet for {} (auto-indexes on first MCP tool call)", root.display());
+        println!(
+            "Index:       none yet for {} (auto-indexes on first MCP tool call)",
+            root.display()
+        );
     }
 
     Ok(())

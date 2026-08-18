@@ -298,7 +298,11 @@ mod tests {
         assert_eq!(loaded.index.max_file_size_kb, default_max_file_size_kb());
 
         // A deliberate non-default value is left alone.
-        std::fs::write(fdir.join("config.toml"), "[index]\nmax_file_size_kb = 256\n").unwrap();
+        std::fs::write(
+            fdir.join("config.toml"),
+            "[index]\nmax_file_size_kb = 256\n",
+        )
+        .unwrap();
         let loaded = Config::load(dir.path()).unwrap();
         assert_eq!(loaded.index.max_file_size_kb, 256);
     }

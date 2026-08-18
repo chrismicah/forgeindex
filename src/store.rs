@@ -875,10 +875,8 @@ fn rebuild_inbound_edges(
     file_path: &str,
     inserted_symbols: &[InsertedSymbolRecord],
 ) -> Result<()> {
-    let names: std::collections::HashSet<&str> = inserted_symbols
-        .iter()
-        .map(|s| s.name.as_str())
-        .collect();
+    let names: std::collections::HashSet<&str> =
+        inserted_symbols.iter().map(|s| s.name.as_str()).collect();
     if names.is_empty() {
         return Ok(());
     }
@@ -899,9 +897,8 @@ fn rebuild_inbound_edges(
 
     for (ref_file_id, ref_file_path) in referencing_files {
         // Load that file's symbols, imports, and only the relevant references.
-        let mut sym_stmt = conn.prepare(
-            "SELECT id, name, byte_start, byte_end FROM symbols WHERE file_id = ?1",
-        )?;
+        let mut sym_stmt =
+            conn.prepare("SELECT id, name, byte_start, byte_end FROM symbols WHERE file_id = ?1")?;
         let symbols: Vec<InsertedSymbolRecord> = sym_stmt
             .query_map(params![ref_file_id], |row| {
                 Ok(InsertedSymbolRecord {

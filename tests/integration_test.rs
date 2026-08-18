@@ -588,7 +588,7 @@ fn test_incremental_reindex_preserves_edges_and_prunes() {
 fn test_index_file_applies_filters() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    std::fs::write(root.join("big.py"), "x = 1\n".repeat(1)).unwrap();
+    std::fs::write(root.join("big.py"), "x = 1\n").unwrap();
     let store = Store::open(&root.join(".forgeindex").join("index.db")).unwrap();
     let mut config = Config::default();
     config.index.languages = vec!["rust".into()]; // python disabled

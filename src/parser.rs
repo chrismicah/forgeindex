@@ -1309,10 +1309,10 @@ fn swift_function_symbol(node: Node, source: &[u8], kind: SymbolKind) -> Option<
 /// includes SwiftUI `body` and wrapped state), as opposed to a `let` constant.
 fn swift_is_var_binding(node: Node, source: &[u8]) -> bool {
     let mut cursor = node.walk();
-    if node
-        .children(&mut cursor)
-        .any(|c| c.kind() == "var" || (c.kind() == "value_binding_pattern" && node_text(c, source).starts_with("var")))
-    {
+    if node.children(&mut cursor).any(|c| {
+        c.kind() == "var"
+            || (c.kind() == "value_binding_pattern" && node_text(c, source).starts_with("var"))
+    }) {
         return true;
     }
     // Fallback: token scan of the declaration head (before any `=`/`{`).
@@ -1346,7 +1346,7 @@ fn swift_push_properties(node: Node, source: &[u8], out: &mut Vec<Symbol>) {
                 pushed = true;
                 out.push(Symbol {
                     name,
-                    kind: kind.clone(),
+                    kind,
                     visibility: vis,
                     signature: sig.clone(),
                     docstring: None,
@@ -1853,7 +1853,10 @@ fn call_target_node<'a>(node: Node<'a>, lang: &str) -> Option<Node<'a>> {
 
 fn extract_reference_name(node: Node, source: &[u8]) -> Option<String> {
     match node.kind() {
-        "identifier" | "type_identifier" | "field_identifier" | "property_identifier"
+        "identifier"
+        | "type_identifier"
+        | "field_identifier"
+        | "property_identifier"
         | "simple_identifier" => sanitize_reference_name(node_text(node, source)),
         _ => {
             let mut result = None;
@@ -1964,31 +1967,59 @@ typealias Handler = (Int) -> Void
 
         // Top-level symbols
         let top: Vec<_> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
-        assert!(top.contains(&"freeFunction"), "missing freeFunction: {top:?}");
+        assert!(
+            top.contains(&"freeFunction"),
+            "missing freeFunction: {top:?}"
+        );
         assert!(top.contains(&"MyStruct"), "missing MyStruct: {top:?}");
         assert!(top.contains(&"MyClass"));
         assert!(top.contains(&"Direction"));
         assert!(top.contains(&"Drawable"));
         assert!(top.contains(&"Handler"));
         // Extension methods are flattened to `Type.method`
-        assert!(top.contains(&"MyStruct.draw"), "missing extension method: {top:?}");
+        assert!(
+            top.contains(&"MyStruct.draw"),
+            "missing extension method: {top:?}"
+        );
 
         // Kinds
-        let struct_sym = parsed.symbols.iter().find(|s| s.name == "MyStruct").unwrap();
+        let struct_sym = parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "MyStruct")
+            .unwrap();
         assert_eq!(struct_sym.kind, SymbolKind::Class);
         assert_eq!(struct_sym.visibility, Visibility::Public);
-        let proto = parsed.symbols.iter().find(|s| s.name == "Drawable").unwrap();
+        let proto = parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "Drawable")
+            .unwrap();
         assert_eq!(proto.kind, SymbolKind::Interface);
 
         // Members nested under their type
-        let method_names: Vec<_> = struct_sym.children.iter().map(|c| c.name.as_str()).collect();
-        assert!(method_names.contains(&"method"), "members: {method_names:?}");
+        let method_names: Vec<_> = struct_sym
+            .children
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(
+            method_names.contains(&"method"),
+            "members: {method_names:?}"
+        );
         assert!(method_names.contains(&"id"));
 
         // Enum cases
-        let dir = parsed.symbols.iter().find(|s| s.name == "Direction").unwrap();
+        let dir = parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "Direction")
+            .unwrap();
         let cases: Vec<_> = dir.children.iter().map(|c| c.name.as_str()).collect();
-        assert!(cases.contains(&"up") && cases.contains(&"down"), "cases: {cases:?}");
+        assert!(
+            cases.contains(&"up") && cases.contains(&"down"),
+            "cases: {cases:?}"
+        );
 
         // Imports
         let modules: Vec<_> = parsed
@@ -2045,11 +2076,23 @@ extension ContentView {
         assert!(top.contains(&"ContentView.preview"), "top: {top:?}");
 
         // var → Property (incl. wrapped state and computed body), let → Const
-        let view = parsed.symbols.iter().find(|s| s.name == "ContentView").unwrap();
+        let view = parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "ContentView")
+            .unwrap();
         let counter = view.children.iter().find(|c| c.name == "counter").unwrap();
-        assert_eq!(counter.kind, SymbolKind::Property, "wrapped var is a property");
+        assert_eq!(
+            counter.kind,
+            SymbolKind::Property,
+            "wrapped var is a property"
+        );
         let body = view.children.iter().find(|c| c.name == "body").unwrap();
-        assert_eq!(body.kind, SymbolKind::Property, "computed var is a property");
+        assert_eq!(
+            body.kind,
+            SymbolKind::Property,
+            "computed var is a property"
+        );
         let fixed = view.children.iter().find(|c| c.name == "fixed").unwrap();
         assert_eq!(fixed.kind, SymbolKind::Const, "let stays const");
         let title = parsed
@@ -2135,7 +2178,11 @@ final class VM {
         }
 
         // Generic function keeps its bare name despite <T, U> and multi-line where clause.
-        let t = parsed.symbols.iter().find(|s| s.name == "transform").unwrap();
+        let t = parsed
+            .symbols
+            .iter()
+            .find(|s| s.name == "transform")
+            .unwrap();
         assert_eq!(t.visibility, Visibility::Public);
 
         // Operator declaration captured.
@@ -2171,8 +2218,14 @@ final class VM {
         )
         .expect("swift parses");
         let names: Vec<_> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"a") && names.contains(&"b"), "got {names:?}");
-        assert!(names.contains(&"p") && names.contains(&"q"), "got {names:?}");
+        assert!(
+            names.contains(&"a") && names.contains(&"b"),
+            "got {names:?}"
+        );
+        assert!(
+            names.contains(&"p") && names.contains(&"q"),
+            "got {names:?}"
+        );
     }
 
     #[test]

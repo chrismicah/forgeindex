@@ -124,7 +124,10 @@ fn skip_reason(
                 .extension()
                 .map(|e| e.to_string_lossy().to_string())
                 .unwrap_or_else(|| "none".to_string());
-            return Some(SkipReason::Other(format!("unsupported extension: .{}", ext)));
+            return Some(SkipReason::Other(format!(
+                "unsupported extension: .{}",
+                ext
+            )));
         }
     };
 
@@ -335,7 +338,9 @@ pub fn index_directory(root: &Path, store: &Store, config: &Config) -> Result<In
         for f in &too_large_files {
             eprintln!("[forgeindex]   {}", f);
         }
-        eprintln!("[forgeindex]   Raise max_file_size_kb in .forgeindex/config.toml to include them.");
+        eprintln!(
+            "[forgeindex]   Raise max_file_size_kb in .forgeindex/config.toml to include them."
+        );
     }
 
     info!("Indexed {} files", indexed);
@@ -372,7 +377,12 @@ pub enum IndexOutcome {
 
 /// Index a single file, applying the same config filters as a directory walk
 /// (exclude patterns, language list, size cap, test-file filter).
-pub fn index_file(root: &Path, path: &Path, store: &Store, config: &Config) -> Result<IndexOutcome> {
+pub fn index_file(
+    root: &Path,
+    path: &Path,
+    store: &Store,
+    config: &Config,
+) -> Result<IndexOutcome> {
     let excludes = build_exclude_set(&config.index.exclude_patterns);
     let rel_path = path.strip_prefix(root).unwrap_or(path);
     if let Some(reason) = skip_reason(rel_path, path, config, &excludes) {
