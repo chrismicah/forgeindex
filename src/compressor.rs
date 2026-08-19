@@ -63,10 +63,8 @@ pub fn skeleton(source: &str, symbols: &[SymbolRecord], aggregate_imports: bool)
             "function" | "method" => {
                 output.push_str("  ...\n");
             }
-            "class" => {
-                if kids.is_empty() {
-                    output.push_str("  ...\n");
-                }
+            "class" if kids.is_empty() => {
+                output.push_str("  ...\n");
             }
             _ => {}
         }

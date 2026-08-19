@@ -100,16 +100,17 @@ build_from_source() {
     fi
 
     info "Building forgeindex (this takes ~1-2 minutes)..."
-    cargo install --git "https://github.com/${REPO}.git" --root "$HOME/.local" 2>&1
+    # Build into a temporary cargo root, then copy the binary to INSTALL_DIR.
+    # This respects FORGEINDEX_INSTALL_DIR and never touches ~/.cargo/bin.
+    BUILD_ROOT="$(mktemp -d)"
+    cargo install --git "https://github.com/${REPO}.git" --root "$BUILD_ROOT" 2>&1
 
-    if [ ! -f "$INSTALL_DIR/$BINARY" ]; then
-        # cargo install puts it in ~/.local/bin by default with --root ~/.local
-        CARGO_BIN="$HOME/.cargo/bin/$BINARY"
-        if [ -f "$CARGO_BIN" ]; then
-            mkdir -p "$INSTALL_DIR"
-            cp "$CARGO_BIN" "$INSTALL_DIR/$BINARY"
-        fi
+    if [ -f "$BUILD_ROOT/bin/$BINARY" ]; then
+        mkdir -p "$INSTALL_DIR"
+        cp "$BUILD_ROOT/bin/$BINARY" "$INSTALL_DIR/$BINARY"
+        chmod +x "$INSTALL_DIR/$BINARY"
     fi
+    rm -rf "$BUILD_ROOT"
 }
 
 check_path() {

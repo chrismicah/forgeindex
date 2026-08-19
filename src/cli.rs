@@ -64,6 +64,13 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Register this binary as an MCP server for Claude Code (user scope,
+    /// absolute path — works in every project and GUI-launched app)
+    Register,
+
+    /// Diagnose common setup problems (PATH, registration, index health)
+    Doctor,
 }
 
 #[derive(Subcommand)]

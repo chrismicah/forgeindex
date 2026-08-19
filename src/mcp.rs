@@ -21,6 +21,20 @@ impl McpServer {
         Self { root_path, config }
     }
 
+    /// Resolve a relative file path against the project root, rejecting paths
+    /// that escape it (e.g. `../../etc/passwd` or absolute paths).
+    fn resolve_in_root(&self, rel_path: &str) -> Result<PathBuf> {
+        let candidate = Path::new(rel_path);
+        if candidate.is_absolute()
+            || candidate
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(anyhow!("INVALID_PATH: {} escapes project root", rel_path));
+        }
+        Ok(self.root_path.join(candidate))
+    }
+
     pub fn run(&self) -> Result<()> {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
@@ -166,6 +180,25 @@ impl McpServer {
 
     fn call_tool(&self, name: &str, args: &Value) -> Result<String> {
         let db_path = Config::db_path(&self.root_path);
+        if !db_path.exists() {
+            // First tool call in a project with no index (common in fresh git
+            // worktrees): build it now instead of erroring out.
+            eprintln!(
+                "[forgeindex] No index at {} — auto-indexing {}",
+                db_path.display(),
+                self.root_path.display()
+            );
+            std::fs::create_dir_all(self.root_path.join(".forgeindex"))?;
+            if !Config::config_path(&self.root_path).exists() {
+                self.config.save(&self.root_path)?;
+            }
+            let store = Store::open(&db_path)?;
+            let summary = indexer::index_directory(&self.root_path, &store, &self.config)?;
+            eprintln!(
+                "[forgeindex] Auto-indexed {} files ({} scanned)",
+                summary.indexed, summary.total_files
+            );
+        }
         let store = Store::open(&db_path)?;
 
         match name {
@@ -421,8 +454,18 @@ impl McpServer {
             return Err(anyhow!("SYMBOL_NOT_FOUND: {}", name));
         }
 
+        // Common names (`init`, `body`, `shared`) can match hundreds of
+        // symbols in large repos; cap the response and say what was omitted.
+        const MAX_FIND_RESULTS: usize = 25;
+        let total = results.len();
         let mut output = String::new();
-        for sym in &results {
+        if total > MAX_FIND_RESULTS {
+            output.push_str(&format!(
+                "{} symbols named '{}' — showing first {}. Narrow with the 'kind' parameter or use a qualified name (e.g. Type.{}).\n\n",
+                total, name, MAX_FIND_RESULTS, name
+            ));
+        }
+        for sym in results.iter().take(MAX_FIND_RESULTS) {
             output.push_str(&format!("Name: {}\n", sym.qualified_name));
             output.push_str(&format!("Simple Name: {}\n", sym.name));
             output.push_str(&format!("Kind: {}\n", sym.kind));
@@ -455,11 +498,29 @@ impl McpServer {
         }
 
         let sym = &results[0];
+        let ambiguity_note = if results.len() > 1 {
+            let others: Vec<String> = results
+                .iter()
+                .skip(1)
+                .take(5)
+                .map(|s| format!("{} ({})", s.qualified_name, s.file_path))
+                .collect();
+            format!(
+                "NOTE: {} symbols match '{}'; showing {} from {}. Others: {}\n\n",
+                results.len(),
+                symbol_name,
+                sym.qualified_name,
+                sym.file_path,
+                others.join(", ")
+            )
+        } else {
+            String::new()
+        };
 
         // Skeleton mode: return signature + child signatures without source body
         if mode == "skeleton" {
             let file_symbols = store.get_file_symbols(&sym.file_path)?;
-            let mut output = format!("// {} (skeleton)\n", sym.file_path);
+            let mut output = format!("{}// {} (skeleton)\n", ambiguity_note, sym.file_path);
             output.push_str(&sym.signature);
             output.push('\n');
             let children: Vec<&_> = file_symbols
@@ -475,12 +536,26 @@ impl McpServer {
             return Ok(output);
         }
 
-        let file_path = self.root_path.join(&sym.file_path);
+        let file_path = self.resolve_in_root(&sym.file_path)?;
         let source = std::fs::read_to_string(&file_path)
             .map_err(|_| anyhow!("Cannot read source file: {}", sym.file_path))?;
 
-        let start = sym.byte_start.min(source.len());
-        let end = sym.byte_end.min(source.len());
+        // Clamp byte offsets to the file and to valid UTF-8 boundaries — the
+        // file may have changed since indexing, leaving stale offsets.
+        let mut start = sym.byte_start.min(source.len());
+        let mut end = sym.byte_end.min(source.len());
+        if start > end {
+            return Err(anyhow!(
+                "STALE_INDEX: byte range for {} is invalid; run `forgeindex reindex`",
+                symbol_name
+            ));
+        }
+        while start > 0 && !source.is_char_boundary(start) {
+            start -= 1;
+        }
+        while end < source.len() && !source.is_char_boundary(end) {
+            end += 1;
+        }
         let fragment = &source[start..end];
         let total_chars = fragment.len();
 
@@ -490,19 +565,27 @@ impl McpServer {
 
         if total_chars <= max_chars {
             Ok(format!(
-                "// {}:L{}-L{}\n{}",
-                sym.file_path, start_line, end_line, fragment
+                "{}// {}:L{}-L{}\n{}",
+                ambiguity_note, sym.file_path, start_line, end_line, fragment
             ))
         } else {
             let head_budget = max_chars * 3 / 4;
             let tail_budget = max_chars - head_budget;
-            let head = &fragment[..head_budget.min(fragment.len())];
-            let tail_start = fragment.len().saturating_sub(tail_budget);
+            let mut head_end = head_budget.min(fragment.len());
+            while head_end > 0 && !fragment.is_char_boundary(head_end) {
+                head_end -= 1;
+            }
+            let head = &fragment[..head_end];
+            let mut tail_start = fragment.len().saturating_sub(tail_budget);
+            while tail_start < fragment.len() && !fragment.is_char_boundary(tail_start) {
+                tail_start += 1;
+            }
             let tail = &fragment[tail_start..];
             let omitted = total_chars - head_budget - tail_budget;
 
             Ok(format!(
-                "// {}:L{}-L{} ({} chars total, showing first {} + last {})\n{}\n\n// ... ({} chars omitted) ...\n\n{}",
+                "{}// {}:L{}-L{} ({} chars total, showing first {} + last {})\n{}\n\n// ... ({} chars omitted) ...\n\n{}",
+                ambiguity_note,
                 sym.file_path,
                 start_line,
                 end_line,
@@ -535,6 +618,14 @@ impl McpServer {
             ));
         }
 
+        // Next-step hint so agents chain tools instead of falling back to grep.
+        if let Some(first) = results.first() {
+            output.push_str(&format!(
+                "\nNext: read_source(symbol='{}') for the body, get_impact(symbol='{}') for blast radius, get_skeleton(file_path='{}') for the whole file's structure.\n",
+                first.name, first.name, first.file_path
+            ));
+        }
+
         Ok(output)
     }
 
@@ -545,7 +636,7 @@ impl McpServer {
         }
 
         // Read source for import extraction
-        let full_path = self.root_path.join(file_path);
+        let full_path = self.resolve_in_root(file_path)?;
         let source = std::fs::read_to_string(&full_path).unwrap_or_default();
 
         Ok(compressor::skeleton(
@@ -864,23 +955,53 @@ impl McpServer {
             "Database: {}\n",
             Config::db_path(&self.root_path).display()
         ));
+        if let Ok(Some(json)) = store.get_meta(indexer::LAST_SUMMARY_META_KEY) {
+            if let Ok(summary) = serde_json::from_str::<indexer::IndexSummary>(&json) {
+                if !summary.too_large_files.is_empty() {
+                    output.push_str(&format!(
+                        "\nWARNING: {} file(s) skipped for exceeding max_file_size_kb:\n",
+                        summary.too_large_files.len()
+                    ));
+                    for f in &summary.too_large_files {
+                        output.push_str(&format!("  {}\n", f));
+                    }
+                    output.push_str(
+                        "Raise max_file_size_kb in .forgeindex/config.toml and call reindex to include them.\n",
+                    );
+                }
+            }
+        }
         Ok(output)
     }
 
     fn tool_reindex(&self, store: &Store, path: Option<&str>) -> Result<String> {
         let message = if let Some(p) = path {
-            let indexed = indexer::index_file(&self.root_path, Path::new(p), store, &self.config)?;
-            if indexed {
-                format!("Re-indexed: {}", p)
-            } else {
-                format!("Re-index skipped: {} unchanged.", p)
+            // Resolve against the project root (and refuse escapes) — the
+            // server's cwd is not necessarily the project root.
+            let full_path = self.resolve_in_root(p)?;
+            match indexer::index_file(&self.root_path, &full_path, store, &self.config)? {
+                indexer::IndexOutcome::Indexed => format!("Re-indexed: {}", p),
+                indexer::IndexOutcome::Unchanged => {
+                    format!("Re-index skipped: {} unchanged.", p)
+                }
+                indexer::IndexOutcome::Skipped(reason) => {
+                    format!("Re-index skipped: {} ({})", p, reason)
+                }
             }
         } else {
             let summary = indexer::index_directory(&self.root_path, store, &self.config)?;
-            format!(
+            let mut msg = format!(
                 "Re-indexed {} files ({} unchanged, {} scanned).",
                 summary.indexed, summary.unchanged, summary.total_files
-            )
+            );
+            if !summary.too_large_files.is_empty() {
+                msg.push_str(&format!(
+                    "\nWARNING: {} file(s) skipped as too large: {}",
+                    summary.too_large_files.len(),
+                    summary.too_large_files.join(", ")
+                ));
+            }
+            msg
         };
 
         Ok(message)
@@ -931,8 +1052,7 @@ impl McpServer {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "Search query" },
-                        "max_results": { "type": "integer", "default": 10, "description": "Maximum results" },
-                        "max_tokens": { "type": "integer", "default": 2000, "description": "Maximum tokens in response" }
+                        "max_results": { "type": "integer", "default": 10, "description": "Maximum results" }
                     },
                     "required": ["query"]
                 }

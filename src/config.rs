@@ -14,6 +14,23 @@ fn default_languages() -> Vec<String> {
         "c".into(),
         "cpp".into(),
         "ruby".into(),
+        "swift".into(),
+    ]
+}
+
+/// The default language set prior to Swift support — used to migrate older configs.
+fn default_languages_without_swift() -> Vec<String> {
+    vec![
+        "python".into(),
+        "typescript".into(),
+        "tsx".into(),
+        "javascript".into(),
+        "rust".into(),
+        "go".into(),
+        "java".into(),
+        "c".into(),
+        "cpp".into(),
+        "ruby".into(),
     ]
 }
 
@@ -46,8 +63,12 @@ fn default_exclude_patterns() -> Vec<String> {
 }
 
 fn default_max_file_size_kb() -> u64 {
-    512
+    2048
 }
+
+/// Pre-0.2 default size cap — used to migrate older configs. 512 KB silently
+/// excluded large real-world files (e.g. monolithic SwiftUI views).
+const LEGACY_MAX_FILE_SIZE_KB: u64 = 512;
 
 fn default_token_budget() -> usize {
     32000
@@ -219,6 +240,14 @@ impl Config {
             if config.index.languages == legacy_default_languages_without_tsx() {
                 config.index.languages.insert(2, "tsx".into());
             }
+            // Migrate pre-Swift default configs so existing repos pick up Swift indexing.
+            if config.index.languages == default_languages_without_swift() {
+                config.index.languages.push("swift".into());
+            }
+            // Migrate the old 512 KB default cap, which silently skipped large files.
+            if config.index.max_file_size_kb == LEGACY_MAX_FILE_SIZE_KB {
+                config.index.max_file_size_kb = default_max_file_size_kb();
+            }
             Ok(config)
         } else {
             Ok(Config::default())
@@ -240,5 +269,66 @@ impl Config {
 
     pub fn db_path(root: &Path) -> PathBuf {
         root.join(".forgeindex").join("index.db")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_enables_swift() {
+        assert!(Config::default()
+            .index
+            .languages
+            .contains(&"swift".to_string()));
+    }
+
+    #[test]
+    fn legacy_size_cap_is_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let fdir = dir.path().join(".forgeindex");
+        std::fs::create_dir_all(&fdir).unwrap();
+        std::fs::write(
+            fdir.join("config.toml"),
+            "[index]\nmax_file_size_kb = 512\n",
+        )
+        .unwrap();
+        let loaded = Config::load(dir.path()).unwrap();
+        assert_eq!(loaded.index.max_file_size_kb, default_max_file_size_kb());
+
+        // A deliberate non-default value is left alone.
+        std::fs::write(
+            fdir.join("config.toml"),
+            "[index]\nmax_file_size_kb = 256\n",
+        )
+        .unwrap();
+        let loaded = Config::load(dir.path()).unwrap();
+        assert_eq!(loaded.index.max_file_size_kb, 256);
+    }
+
+    #[test]
+    fn pre_swift_config_is_migrated_to_include_swift() {
+        let dir = tempfile::tempdir().unwrap();
+        let fdir = dir.path().join(".forgeindex");
+        std::fs::create_dir_all(&fdir).unwrap();
+        // Write a config carrying the old default language set (no swift).
+        let langs = default_languages_without_swift()
+            .iter()
+            .map(|l| format!("\"{l}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::write(
+            fdir.join("config.toml"),
+            format!("[index]\nlanguages = [{langs}]\n"),
+        )
+        .unwrap();
+
+        let loaded = Config::load(dir.path()).unwrap();
+        assert!(
+            loaded.index.languages.contains(&"swift".to_string()),
+            "expected migration to append swift, got {:?}",
+            loaded.index.languages
+        );
     }
 }

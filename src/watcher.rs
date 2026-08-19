@@ -97,20 +97,52 @@ fn resolve_git_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
     }
 }
 
+/// Resolve the directory git actually reads hooks from. In a linked worktree
+/// the gitdir is `.git/worktrees/<name>/`, but git resolves hooks from
+/// $GIT_COMMON_DIR/hooks — the `commondir` file points there.
+fn resolve_hooks_git_dir(repo_path: &Path) -> Result<std::path::PathBuf> {
+    let git_dir = resolve_git_dir(repo_path)?;
+    let commondir_file = git_dir.join("commondir");
+    if let Ok(content) = std::fs::read_to_string(&commondir_file) {
+        let common = content.trim();
+        let resolved = if Path::new(common).is_absolute() {
+            std::path::PathBuf::from(common)
+        } else {
+            git_dir.join(common)
+        };
+        if let Ok(canonical) = resolved.canonicalize() {
+            return Ok(canonical);
+        }
+    }
+    Ok(git_dir)
+}
+
 /// Install git hooks for auto-reindexing.
 pub fn install_hooks(repo_path: &Path, hook_types: &[String]) -> Result<()> {
-    let git_dir = resolve_git_dir(repo_path)?;
+    let git_dir = resolve_hooks_git_dir(repo_path)?;
 
     let hooks_dir = git_dir.join("hooks");
     std::fs::create_dir_all(&hooks_dir)?;
 
-    let hook_script = r#"#!/bin/sh
+    // Embed this binary's absolute path so the hook works even when the
+    // invoking environment (GUI git clients, IDEs) lacks ~/.cargo/bin on PATH.
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "forgeindex".to_string());
+    let hook_script = format!(
+        r#"#!/bin/sh
 # ForgeIndex auto-reindex hook
 # Automatically re-indexes the codebase after git operations
-if command -v forgeindex > /dev/null 2>&1; then
-    forgeindex reindex > /dev/null 2>&1 &
+FORGEINDEX="{exe}"
+command -v "$FORGEINDEX" > /dev/null 2>&1 || FORGEINDEX=forgeindex
+if command -v "$FORGEINDEX" > /dev/null 2>&1; then
+    "$FORGEINDEX" reindex > /dev/null 2>&1 &
 fi
-"#;
+"#
+    );
+    let hook_script = hook_script.as_str();
 
     let marker = "# ForgeIndex auto-reindex hook";
 
@@ -147,7 +179,7 @@ fi
 
 /// Remove ForgeIndex git hooks.
 pub fn uninstall_hooks(repo_path: &Path, hook_types: &[String]) -> Result<()> {
-    let git_dir = match resolve_git_dir(repo_path) {
+    let git_dir = match resolve_hooks_git_dir(repo_path) {
         Ok(d) => d,
         Err(_) => return Ok(()),
     };

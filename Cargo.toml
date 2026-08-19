@@ -2,9 +2,19 @@
 name = "forgeindex"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
 description = "AST-driven codebase intelligence MCP server for autonomous coding agents"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/chrismicah/forgeindex"
+homepage = "https://github.com/chrismicah/forgeindex"
+keywords = ["mcp", "ast", "tree-sitter", "code-intelligence", "agents"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["tests/fixtures/", "docs/", ".github/", "assets/", ".context/"]
+
+[profile.release]
+lto = "thin"
+strip = true
 
 [[bin]]
 name = "forgeindex"
@@ -22,6 +32,8 @@ tree-sitter-java = "0.23"
 tree-sitter-c = "0.23"
 tree-sitter-cpp = "0.23"
 tree-sitter-ruby = "0.23"
+# Pinned: 0.7+ targets tree-sitter ABI 15 (needs tree-sitter 0.25); 0.6.0 is ABI 14, matching our 0.24 runtime.
+tree-sitter-swift = "=0.6.0"
 
 # Storage
 rusqlite = { version = "0.32", features = ["bundled"] }
